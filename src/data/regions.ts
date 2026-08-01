@@ -37,25 +37,28 @@ export interface RegionDef {
 }
 
 /**
- * Author a bilateral landmark once (for the left side) and mirror it to the
- * right by negating X — the mesh is bilaterally symmetric about X=0, so a
- * landmark anchored the same way anatomically on both sides always has
- * exactly opposite X and identical Y/Z.
+ * Author a bilateral landmark once (calibrated on the model's own right
+ * side — the side that appears on screen-left, since the avatar faces the
+ * camera like a mirror) and mirror it to the left by negating X. The mesh
+ * is bilaterally symmetric about X=0, so a landmark anchored the same way
+ * anatomically on both sides always has exactly opposite X and identical
+ * Y/Z. Left/right are always from the avatar's own perspective (the
+ * medical convention — patient's left/right), not the viewer's.
  */
 function bilateralRegion(
   idBase: string,
   nameBase: string,
-  anchorLeft: [number, number, number],
+  anchorRight: [number, number, number],
   category: RegionCategory,
   description: string,
   possibleCauses: string[],
   redFlags?: string[],
 ): [RegionDef, RegionDef] {
-  const [x, y, z] = anchorLeft;
+  const [x, y, z] = anchorRight;
   const base = { category, description, possibleCauses, redFlags };
   return [
-    { ...base, id: `${idBase}_L`, name: `Left ${nameBase}`, anchor: [x, y, z] },
-    { ...base, id: `${idBase}_R`, name: `Right ${nameBase}`, anchor: [-x, y, z] },
+    { ...base, id: `${idBase}_R`, name: `Right ${nameBase}`, anchor: [x, y, z] },
+    { ...base, id: `${idBase}_L`, name: `Left ${nameBase}`, anchor: [-x, y, z] },
   ];
 }
 
