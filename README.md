@@ -1,32 +1,41 @@
-# React + TypeScript + Vite
+# Interactive Pain Location Tool
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+An interactive 3D human avatar that lets users click on a body location to explore possible causes of pain in that area.
 
-Currently, two official plugins are available:
+**[Live Demo →](https://3d-avatar-pain-locator.vercel.app)**
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## About
 
-## React Compiler
+This project maps user-selected points on a 3D human model to structured information about potential causes of pain at that location, combining an interactive interface with underlying medical/anatomical logic.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+It was built independently, end-to-end, using AI-assisted development with **Claude Code** — from initial architecture through deployment.
 
-## Expanding the Oxlint configuration
+## How It Works
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+1. The user rotates and clicks on a location on the 3D avatar
+2. The click coordinates map to a specific body region
+3. The app returns structured information about possible causes of pain associated with that region
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
+## Tech Stack
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+- **React** + **TypeScript**
+- **Vite** for build tooling
+- 3D rendering for the interactive avatar
+- Deployed on **Vercel**
+
+## Motivation
+
+Built out of a personal interest in combining a life sciences background (B.S., Molecular, Cellular, and Developmental Biology, UCLA) with hands-on software development, and as a way to explore AI-assisted development tools in a real, shipped project rather than a tutorial exercise.
+
+## Running Locally
+
+\`\`\`bash
+git clone https://github.com/ianniehoff/3d-avatar-pain-locator.git
+cd 3d-avatar-pain-locator
+npm install
+npm run dev
+\`\`\`
+
+## Status
+
+This is a working prototype that I'm actively iterating on — feedback and suggestions welcome.
