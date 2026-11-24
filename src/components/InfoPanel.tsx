@@ -8,6 +8,7 @@ const CATEGORY_LABEL: Record<RegionCategory, string> = {
   ligament: "Ligament",
   muscle: "Muscle",
   nerve: "Nerve",
+  organ: "Organ area",
   region: "General region",
 };
 
@@ -21,7 +22,7 @@ export function InfoPanel() {
       <div className="info-panel info-panel--empty">
         <p>
           Rotate and zoom the model, then click on the spot where you feel pain
-          or discomfort to see what it's called.
+          or discomfort to see what it's called. Hover to preview an area, click to select it.
         </p>
         <p className="info-panel__hint">
           Prefer not to use the 3D model? Use the searchable list below instead.
@@ -45,6 +46,7 @@ export function InfoPanel() {
         </button>
       </div>
 
+      <p className="info-panel__group">{region.group}</p>
       <p className="info-panel__description">{region.description}</p>
 
       {region.redFlags && region.redFlags.length > 0 && (

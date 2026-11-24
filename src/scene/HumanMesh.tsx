@@ -1,109 +1,125 @@
-import { useMemo, useRef } from "react";
+import { use, useCallback, useMemo, useRef } from "react";
 import { useGLTF } from "@react-three/drei";
-import { useFrame } from "@react-three/fiber";
+import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
-import { useRegionSelection } from "../hooks/useRegionSelection";
 import { REGIONS } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
-import { MAX_MATCH_DISTANCE } from "../lib/regionMatch";
 
 const MODEL_URL = "/models/HumanModels.glb";
-// Raw bounding-box height of the "Man (HighPoly)" node in the source file
-// (see scratchpad inspection) — the source isn't authored in real-world
-// meters, so we rescale it to match our scene's ~1.75m convention.
+const REGION_MAP_URL = "/models/regionMap.bin";
+// Raw bounding-box height of the "Man (HighPoly)" node in the source file —
+// the source isn't authored in real-world meters, so we rescale it to match
+// our scene's ~1.75m convention.
 const SOURCE_HEIGHT = 3.495;
 const TARGET_HEIGHT = 1.75;
 const SCALE = TARGET_HEIGHT / SOURCE_HEIGHT;
+
+const HOVER_COLOR = new THREE.Color("#ffb347");
+const SELECTED_COLOR = new THREE.Color("#e0463f");
+const HOVER_MAX_STRENGTH = 0.65;
+const SELECTED_STRENGTH = 0.5;
+const LERP_SPEED = 12;
+
+// One Uint16 per triangle of the mesh: an index into REGIONS. Generated
+// offline by scripts/build_regions.py so every triangle belongs to exactly one
+// anatomical region, which gives crisp, stable highlight boundaries.
+const regionMapPromise: Promise<Uint16Array> = fetch(REGION_MAP_URL)
+  .then((r) => {
+    if (!r.ok) throw new Error(`Failed to load ${REGION_MAP_URL}: ${r.status}`);
+    return r.arrayBuffer();
+  })
+  .then((buf) => new Uint16Array(buf));
+
+const REGION_INDEX_BY_ID: Record<string, number> = Object.fromEntries(
+  REGIONS.map((r, i) => [r.id, i]),
+);
 
 interface GLTFResult {
   nodes: Record<string, THREE.Mesh>;
   materials: Record<string, THREE.Material>;
 }
 
-// Precomputed once: every region's anchor, in REGIONS order, plus a lookup
-// from region id back to that index — both are fed into the hover shader so
-// it can compute, per-fragment, "which region anchor is nearest to me" using
-// the exact same nearest-neighbor rule as the click handler (regionMatch.ts).
-// That keeps the highlighted patch on the mesh in sync with what would
-// actually get selected, rather than an arbitrary fixed-size glow.
-const REGION_ANCHORS = REGIONS.map((r) => new THREE.Vector3(...r.anchor));
-const REGION_COUNT = REGIONS.length;
-const REGION_INDEX_BY_ID: Record<string, number> = Object.fromEntries(
-  REGIONS.map((r, i) => [r.id, i]),
-);
-const HOVER_COLOR = new THREE.Color("#ffb347");
-const HOVER_MAX_STRENGTH = 0.6;
-const HOVER_LERP_SPEED = 10;
-
-interface HoverShader {
+interface RegionShader {
   uniforms: {
-    uActiveIndex: { value: number };
+    uHoverIndex: { value: number };
     uHoverStrength: { value: number };
+    uSelectedIndex: { value: number };
+    uSelectedStrength: { value: number };
   };
 }
 
 export function HumanMesh() {
   const { nodes, materials } = useGLTF(MODEL_URL) as unknown as GLTFResult;
-  const geometry = nodes["Man_(HighPoly)"].geometry;
-  // The source mesh's baked normals produce dark shading patches under our
-  // lighting — recompute smooth normals from the actual triangle winding instead.
-  useMemo(() => geometry.computeVertexNormals(), [geometry]);
+  const regionMap = use(regionMapPromise);
+  const setHovered = useSelectionStore((s) => s.setHovered);
+  const setSelected = useSelectionStore((s) => s.setSelected);
+  const shaderRef = useRef<RegionShader | null>(null);
 
-  const { onPointerMove, onPointerOut, onClick } = useRegionSelection();
-  const shaderRef = useRef<HoverShader | null>(null);
+  const geometry = useMemo(() => {
+    const source = nodes["Man_(HighPoly)"].geometry.clone();
+    // The source mesh's baked normals produce dark shading patches under our
+    // lighting, so recompute smooth normals while it is still indexed...
+    source.computeVertexNormals();
+    // ...then un-index it so each triangle owns its three vertices and can
+    // carry its own region id without bleeding into its neighbours.
+    const geo = source.toNonIndexed();
+    const triCount = geo.attributes.position.count / 3;
+    if (triCount !== regionMap.length) {
+      console.warn(`Region map has ${regionMap.length} entries but mesh has ${triCount} triangles`);
+    }
+    const ids = new Float32Array(triCount * 3);
+    for (let t = 0; t < triCount; t++) {
+      const id = regionMap[t] ?? 0;
+      ids[t * 3] = id;
+      ids[t * 3 + 1] = id;
+      ids[t * 3 + 2] = id;
+    }
+    geo.setAttribute("regionId", new THREE.BufferAttribute(ids, 1));
+    geo.computeBoundingSphere();
+    return geo;
+  }, [nodes, regionMap]);
 
   const material = useMemo(() => {
     const base = materials.Skin as THREE.MeshStandardMaterial;
     const mat = base.clone();
     mat.onBeforeCompile = (shader) => {
-      shader.uniforms.uAnchors = { value: REGION_ANCHORS };
-      shader.uniforms.uActiveIndex = { value: -1 };
+      shader.uniforms.uHoverIndex = { value: -1 };
       shader.uniforms.uHoverStrength = { value: 0 };
       shader.uniforms.uHoverColor = { value: HOVER_COLOR };
-      shader.uniforms.uMaxHighlightDist = { value: MAX_MATCH_DISTANCE };
+      shader.uniforms.uSelectedIndex = { value: -1 };
+      shader.uniforms.uSelectedStrength = { value: 0 };
+      shader.uniforms.uSelectedColor = { value: SELECTED_COLOR };
 
       shader.vertexShader = shader.vertexShader
-        .replace("#include <common>", "#include <common>\nvarying vec3 vWorldPos;")
-        .replace(
-          "#include <worldpos_vertex>",
-          "#include <worldpos_vertex>\nvWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;",
-        );
+        .replace("#include <common>", "#include <common>\nattribute float regionId;\nvarying float vRegionId;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRegionId = regionId;");
 
       shader.fragmentShader = shader.fragmentShader
         .replace(
           "#include <common>",
           `#include <common>
-          varying vec3 vWorldPos;
-          uniform vec3 uAnchors[${REGION_COUNT}];
-          uniform int uActiveIndex;
+          varying float vRegionId;
+          uniform float uHoverIndex;
           uniform float uHoverStrength;
           uniform vec3 uHoverColor;
-          uniform float uMaxHighlightDist;`,
+          uniform float uSelectedIndex;
+          uniform float uSelectedStrength;
+          uniform vec3 uSelectedColor;`,
         )
         .replace(
           "#include <dithering_fragment>",
           `
-          {
-            float nearestDist = 1e9;
-            int nearestIdx = -1;
-            for (int i = 0; i < ${REGION_COUNT}; i++) {
-              float d = distance(vWorldPos, uAnchors[i]);
-              if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
-            }
-            // Require BOTH "this anchor is nearest" AND "close enough to it" —
-            // otherwise a sparsely-anchored region could visually claim a
-            // fragment that's technically nearest to it but anatomically far
-            // away (e.g. a distant chest fragment being nearer to a shoulder
-            // joint than to the chest's own, farther-away anchor).
-            if (uActiveIndex >= 0 && nearestIdx == uActiveIndex && nearestDist < uMaxHighlightDist) {
-              gl_FragColor.rgb = mix(gl_FragColor.rgb, uHoverColor, uHoverStrength);
-            }
+          if (abs(vRegionId - uSelectedIndex) < 0.5) {
+            gl_FragColor.rgb = mix(gl_FragColor.rgb, uSelectedColor, uSelectedStrength);
+          }
+          if (abs(vRegionId - uHoverIndex) < 0.5) {
+            gl_FragColor.rgb = mix(gl_FragColor.rgb, uHoverColor, uHoverStrength);
           }
           #include <dithering_fragment>
           `,
         );
 
-      shaderRef.current = shader as unknown as HoverShader;
+      shaderRef.current = shader as unknown as RegionShader;
     };
     return mat;
   }, [materials]);
@@ -111,13 +127,56 @@ export function HumanMesh() {
   useFrame((_, delta) => {
     const shader = shaderRef.current;
     if (!shader) return;
-    const hoveredId = useSelectionStore.getState().hoveredRegionId;
-    const activeIndex = hoveredId ? (REGION_INDEX_BY_ID[hoveredId] ?? -1) : -1;
-    shader.uniforms.uActiveIndex.value = activeIndex;
-    const target = activeIndex >= 0 ? HOVER_MAX_STRENGTH : 0;
-    const current = shader.uniforms.uHoverStrength.value;
-    shader.uniforms.uHoverStrength.value = current + (target - current) * Math.min(1, delta * HOVER_LERP_SPEED);
+    const { hoveredRegionId, selectedRegionId } = useSelectionStore.getState();
+    const k = Math.min(1, delta * LERP_SPEED);
+
+    const hoverIndex = hoveredRegionId ? (REGION_INDEX_BY_ID[hoveredRegionId] ?? -1) : -1;
+    const u = shader.uniforms;
+    // Keep the last hovered index while fading out so the glow doesn't pop off.
+    if (hoverIndex >= 0) u.uHoverIndex.value = hoverIndex;
+    const hoverTarget = hoverIndex >= 0 ? HOVER_MAX_STRENGTH : 0;
+    u.uHoverStrength.value += (hoverTarget - u.uHoverStrength.value) * k;
+
+    const selectedIndex = selectedRegionId ? (REGION_INDEX_BY_ID[selectedRegionId] ?? -1) : -1;
+    if (selectedIndex >= 0) u.uSelectedIndex.value = selectedIndex;
+    const selTarget = selectedIndex >= 0 ? SELECTED_STRENGTH : 0;
+    u.uSelectedStrength.value += (selTarget - u.uSelectedStrength.value) * k;
   });
+
+  const regionAt = useCallback(
+    (faceIndex: number | undefined | null) => {
+      if (faceIndex == null) return null;
+      const idx = regionMap[faceIndex];
+      return idx == null ? null : (REGIONS[idx]?.id ?? null);
+    },
+    [regionMap],
+  );
+
+  const onPointerMove = useCallback(
+    (e: ThreeEvent<PointerEvent>) => {
+      e.stopPropagation();
+      setHovered(regionAt(e.faceIndex));
+    },
+    [regionAt, setHovered],
+  );
+
+  const onPointerOut = useCallback(
+    (e: ThreeEvent<PointerEvent>) => {
+      e.stopPropagation();
+      setHovered(null);
+    },
+    [setHovered],
+  );
+
+  const onClick = useCallback(
+    (e: ThreeEvent<MouseEvent>) => {
+      e.stopPropagation();
+      // Ignore clicks that were really the end of an orbit drag.
+      if (e.delta > 4) return;
+      setSelected(regionAt(e.faceIndex));
+    },
+    [regionAt, setSelected],
+  );
 
   return (
     <mesh

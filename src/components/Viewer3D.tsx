@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { Suspense, useRef } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid } from "@react-three/drei";
 import * as THREE from "three";
@@ -43,7 +43,9 @@ export function Viewer3D() {
         <hemisphereLight args={["#ffffff", "#a06a3c", 1.0]} />
         <directionalLight position={[2, 3, 2]} intensity={0.45} />
         <directionalLight position={[-2, 1.5, -1]} intensity={0.25} />
-        <Avatar />
+        <Suspense fallback={null}>
+          <Avatar />
+        </Suspense>
         <Grid
           position={[0, 0, 0]}
           args={[4, 4]}

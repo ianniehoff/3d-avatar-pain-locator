@@ -36,6 +36,20 @@ npm install
 npm run dev
 \`\`\`
 
+## Body Region Map
+
+Every triangle of the 3D model is assigned to one of ~200 anatomical regions (e.g. "Left Outer Elbow", "Right SI Joint", "Left Arch of Foot"). The map is precomputed by `scripts/build_regions.py`, which uses joint landmarks from the model's own skeleton plus hand-tuned geometric rules, and writes:
+
+- `public/models/regionMap.bin` (one region index per triangle)
+- `src/data/regionMap.generated.ts` (region order and label anchors)
+
+The educational content for each region lives in `src/data/regionContent.ts`. To change region boundaries, edit the rules and rerun:
+
+```bash
+python3 scripts/build_regions.py            # needs numpy
+python3 scripts/build_regions.py --preview  # also renders PNG previews (needs matplotlib)
+```
+
 ## Status
 
 This is a working prototype that I'm actively iterating on — feedback and suggestions welcome.
