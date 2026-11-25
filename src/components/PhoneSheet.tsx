@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { REGIONS_BY_ID } from "../data/regions";
+import { getRegion } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
 import { RegionDetails } from "./RegionDetails";
 import { CATEGORY_LABEL } from "../data/categoryLabels";
@@ -23,7 +23,8 @@ const DRAG_THRESHOLD = 6;
 export function PhoneSheet() {
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
   const setSelected = useSelectionStore((s) => s.setSelected);
-  const region = selectedRegionId ? REGIONS_BY_ID[selectedRegionId] : null;
+  const body = useSelectionStore((s) => s.body);
+  const region = getRegion(body, selectedRegionId);
 
   const [state, setState] = useState<SheetState>("bar");
   const [dragOffset, setDragOffset] = useState<number | null>(null);

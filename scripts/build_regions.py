@@ -34,7 +34,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 GLB = ROOT / "assets/source/HumanModels.glb"
 CACHE = ROOT / "scripts/.cache"
-VARIANTS = {"standard": "body_l0.npz"}
+BODIES = {"male": "body_male_l0.npz", "female": "body_female_l0.npz"}
 MAX_BORDER_EDGE = 0.02  # split edges that cross a region border until shorter than this (~1 cm)
 MAX_REFINE_ROUNDS = 8
 OUT_TS = ROOT / "src/data/regionMap.generated.ts"
@@ -117,6 +117,23 @@ def between(v, lo, hi):
 
 
 # ---------------------------------------------------------------- classifier
+def coarse_parts(p):
+    """Split points (left-side folded, canonical male coordinates) into
+    head / arm / leg / neck / trunk."""
+    x, y, z = p[:, 0], p[:, 1], p[:, 2]
+    head_cut = 3.10 - 0.30 * (z + 0.05)            # under the jaw -> base of skull
+    is_head = y > head_cut
+    arm_line = 0.32 - 0.206 * (y - 2.54)           # armpit -> top of shoulder
+    is_arm = (x > arm_line) & (y > 1.45) & ~is_head
+    # Leg vs trunk: inguinal crease in front, gluteal fold behind.
+    crotch_front = 1.60 + 0.65 * np.clip(x - 0.02, 0, None)
+    leg_cut = np.where(z > 0.03, np.minimum(crotch_front, 1.80), 1.53 + 0.1 * np.clip(x - 0.05, 0, None))
+    is_leg = (y < leg_cut) & ~is_arm
+    is_neck = ~is_head & ~is_arm & (y > 2.86 - 0.25 * np.clip(x - 0.05, 0, None))
+    is_trunk = ~is_head & ~is_arm & ~is_leg & ~is_neck
+    return is_head, is_arm, is_leg, is_neck, is_trunk
+
+
 def classify(C):
     """C: (n,3) triangle centroids. Returns array of region id strings."""
     n = len(C)
@@ -134,17 +151,7 @@ def classify(C):
             out[m] = name
 
     # ---- coarse parts
-    head_cut = 3.10 - 0.30 * (z + 0.05)            # under the jaw -> base of skull
-    is_head = y > head_cut
-    arm_line = 0.32 - 0.206 * (y - 2.54)           # armpit -> top of shoulder
-    is_arm = (x > arm_line) & (y > 1.45) & ~is_head
-    hand_t, _ = seg_param(p, ELBOW, WRIST)
-    # Leg vs trunk: inguinal crease in front, gluteal fold behind.
-    crotch_front = 1.60 + 0.65 * np.clip(x - 0.02, 0, None)
-    leg_cut = np.where(z > 0.03, np.minimum(crotch_front, 1.80), 1.53 + 0.1 * np.clip(x - 0.05, 0, None))
-    is_leg = (y < leg_cut) & ~is_arm
-    is_neck = ~is_head & ~is_arm & (y > 2.86 - 0.25 * np.clip(x - 0.05, 0, None))
-    is_trunk = ~is_head & ~is_arm & ~is_leg & ~is_neck
+    is_head, is_arm, is_leg, is_neck, is_trunk = coarse_parts(p)
 
     # ================================================================ HEAD
     h = is_head
@@ -363,6 +370,172 @@ def classify(C):
     return out
 
 
+# ---------------------------------------------------------------- other bodies
+# The rules above are written in the male body's coordinates ("canonical").
+# Any other body is classified by first mapping each of its points onto the
+# matching spot of the male body, bone by bone, using both skeletons' joints
+# (scripts/landmarks.json, from scripts/extract_landmarks.mjs):
+#   arms / legs   rigid-plus-scale transform of each bone (upper arm, forearm,
+#                 hand, thigh, shin, foot), blended smoothly across joints
+#   torso / neck  heights matched piecewise between joints, width scaled
+#                 between the hip and shoulder joints
+#   head          uniform scale about the chin
+# The male body maps to itself, so its regions are unaffected.
+LANDMARKS = json.loads((ROOT / "scripts/landmarks.json").read_text())
+
+
+def _frame(axis, secondary):
+    e1 = axis / np.linalg.norm(axis)
+    e2 = secondary - (secondary @ e1) * e1
+    e2 /= np.linalg.norm(e2)
+    return np.stack([e1, e2, np.cross(e1, e2)], axis=1)
+
+
+def _bone_map(a_src, b_src, sec_src, a_dst, b_dst, sec_dst):
+    """Similarity transform taking bone a_src->b_src onto a_dst->b_dst."""
+    R = _frame(b_dst - a_dst, sec_dst) @ _frame(b_src - a_src, sec_src).T
+    s = np.linalg.norm(b_dst - a_dst) / np.linalg.norm(b_src - a_src)
+    return lambda q: a_dst + s * (q - a_src) @ R.T
+
+
+def _recentre(joint, a, b, pts, r):
+    """Move a joint to the centre of its limb's cross-section (rig joints sit
+    off-centre in this model)."""
+    d = (b - a) / np.linalg.norm(b - a)
+    m = (np.abs((pts - joint) @ d) < 0.012) & (np.linalg.norm(pts - joint, axis=1) < r)
+    return pts[m].mean(axis=0) if m.sum() > 5 else joint
+
+
+def _smoothstep(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def make_canonical_mapper(body, mesh_pos):
+    """Return f(points) -> points in canonical (male) coordinates."""
+    if body == "male":
+        return lambda P: P
+    J = {k: np.array(v, float) for k, v in LANDMARKS[body]["joints"].items()}
+    M = {k: np.array(v, float) for k, v in LANDMARKS["male"]["joints"].items()}
+    top_src = LANDMARKS[body]["highpolyBounds"]["max"][1]
+    top_dst = LANDMARKS["male"]["highpolyBounds"]["max"][1]
+    left = mesh_pos[mesh_pos[:, 0] > 0]
+
+    # source joints (left side), elbow/wrist re-centred like the male constants
+    sh, el, wr = J["upper_arm.L"], J["forearm.L"], J["hand.L"]
+    el = _recentre(el, sh, el, left, 0.12)
+    wr = _recentre(wr, el, wr, left, 0.09)
+    hip, kn, an, toe = J["thigh.L"], J["shin.L"], J["foot.L"], J["toe.L"]
+    across_src = J["f_index.01.L"] - J["f_pinky.01.L"]
+    across_dst = np.array(FINGERS["index"][0]) - np.array(FINGERS["pinky"][0])
+    knuckle_src, knuckle_dst = J["f_middle.01.L"], np.array(FINGERS["middle"][0])
+    fwd = np.array([0, 0, 1.0])
+    up = np.array([0, 1.0, 0])
+
+    upper = _bone_map(sh, el, across_src, SHOULDER, ELBOW, across_dst)
+    fore = _bone_map(el, wr, across_src, ELBOW, WRIST, across_dst)
+    hand = _bone_map(wr, knuckle_src, across_src, WRIST, knuckle_dst, across_dst)
+    thigh = _bone_map(hip, kn, fwd, HIP, KNEE, fwd)
+    shin = _bone_map(kn, an, fwd, KNEE, ANKLE, fwd)
+    foot = _bone_map(an, toe, up, ANKLE, TOE_BASE, up)
+
+    chin_src = np.array([0.0, J["chin"][1], J["chin"][2]])
+    chin_dst = np.array([0.0, M["chin"][1], M["chin"][2]])
+    head_s = (top_dst - chin_dst[1]) / (top_src - chin_src[1])
+
+    ys_src = [0.0, an[1], kn[1], hip[1], J["spine"][1], J["spine.004"][1], chin_src[1], top_src]
+    ys_dst = [0.0, ANKLE[1], KNEE[1], HIP[1], M["spine"][1], M["spine.004"][1], chin_dst[1], top_dst]
+    zs_off = [0.0, 0.0, 0.0, 0.0, M["spine"][2] - J["spine"][2], M["spine.004"][2] - J["spine.004"][2],
+              chin_dst[2] - chin_src[2], chin_dst[2] - chin_src[2]]
+    sx_hip, sx_sh = HIP[0] / hip[0], SHOULDER[0] / sh[0]
+
+    def trunk_rough(q):
+        y_dst = np.interp(q[:, 1], ys_src, ys_dst)
+        sx = np.interp(y_dst, [HIP[1], SHOULDER[1]], [sx_hip, sx_sh])
+        return np.stack([q[:, 0] * sx, y_dst, q[:, 2] + np.interp(q[:, 1], ys_src, zs_off)], axis=1)
+
+    # Refine the torso/neck mapping with measured cross-sections: at every
+    # (canonical) height, match this body's torso half-width and front/back
+    # extent to the male torso's, so front/side/back rules line up.
+    bins = np.arange(1.50, 3.02, 0.03)
+
+    def profile(pts_own, pts_canon_y, mask):
+        w, zlo, zhi = [], [], []
+        for y0 in bins:
+            m = mask & (np.abs(pts_canon_y - y0) < 0.03)
+            if m.sum() < 8:
+                w.append(np.nan); zlo.append(np.nan); zhi.append(np.nan)
+                continue
+            w.append(np.percentile(np.abs(pts_own[m, 0]), 97))
+            zlo.append(np.percentile(pts_own[m, 2], 2))
+            zhi.append(np.percentile(pts_own[m, 2], 98))
+        out = []
+        for arr in (w, zlo, zhi):
+            arr = np.array(arr)
+            ok = ~np.isnan(arr)
+            arr = np.interp(bins, bins[ok], arr[ok])
+            out.append(np.convolve(np.pad(arr, 2, mode="edge"), np.ones(5) / 5, mode="valid"))
+        return out
+
+    male_pos = np.load(CACHE / BODIES["male"])["positions"].astype(float)
+    mp = male_pos.copy(); mp[:, 0] = np.abs(mp[:, 0])
+    _, m_arm, m_leg, _, _ = coarse_parts(mp)
+    Wm, ZLm, ZHm = profile(mp, mp[:, 1], ~m_arm & ~m_leg)
+    sp = mesh_pos.copy(); sp[:, 0] = np.abs(sp[:, 0])
+    rough = trunk_rough(sp)
+    _, s_arm, s_leg, _, _ = coarse_parts(rough)
+    Ws, ZLs, ZHs = profile(sp, rough[:, 1], ~s_arm & ~s_leg)
+
+    def trunk(q):
+        y_dst = np.interp(q[:, 1], ys_src, ys_dst)
+        sx = np.interp(y_dst, bins, Wm / Ws)
+        zl_s, zh_s = np.interp(y_dst, bins, ZLs), np.interp(y_dst, bins, ZHs)
+        zl_m, zh_m = np.interp(y_dst, bins, ZLm), np.interp(y_dst, bins, ZHm)
+        z = zl_m + (q[:, 2] - zl_s) * (zh_m - zl_m) / (zh_s - zl_s)
+        # below the torso profile (legs) keep the simple mapping
+        below = y_dst < bins[0]
+        rough_q = trunk_rough(q)
+        x = np.where(below, rough_q[:, 0], q[:, 0] * sx)
+        z = np.where(below, rough_q[:, 2], z)
+        return np.stack([x, y_dst, z], axis=1)
+
+    def mapper(P):
+        sign = np.where(P[:, 0] >= 0, 1.0, -1.0)
+        q = P.copy()
+        q[:, 0] = np.abs(q[:, 0])
+        T = trunk(q)
+        is_head, is_arm, is_leg, _, _ = coarse_parts(T)
+        out = T.copy()
+
+        # head: uniform scale about the chin, blended in over the upper neck
+        H = chin_dst + (q - chin_src) * head_s
+        w = _smoothstep(chin_src[1] - 0.12, chin_src[1], q[:, 1])[:, None]
+        hm = is_head | (w[:, 0] > 0) & ~is_arm
+        out[hm] = (1 - w[hm]) * T[hm] + w[hm] * H[hm]
+
+        # arms: upper arm -> forearm -> hand, blended across elbow and wrist
+        if is_arm.any():
+            a = q[is_arm]
+            t_fo, _ = seg_param(a, el, wr)
+            w_el = _smoothstep(-0.08, 0.08, t_fo)[:, None]
+            w_wr = _smoothstep(0.94, 1.06, t_fo)[:, None]
+            out[is_arm] = (1 - w_el) * upper(a) + w_el * ((1 - w_wr) * fore(a) + w_wr * hand(a))
+
+        # legs: thigh -> shin -> foot
+        if is_leg.any():
+            g = q[is_leg]
+            t_sh, _ = seg_param(g, kn, an)
+            w_kn = _smoothstep(-0.06, 0.06, t_sh)[:, None]
+            w_an = _smoothstep(0.95, 1.08, t_sh)[:, None]
+            out[is_leg] = (1 - w_kn) * thigh(g) + w_kn * ((1 - w_an) * shin(g) + w_an * foot(g))
+
+        out[:, 0] *= sign
+        return out
+
+    return mapper
+
+
+
 def vertex_adjacency(idx, n):
     """Sparse vertex adjacency (CSR) from triangle edges."""
     from scipy.sparse import coo_matrix
@@ -475,72 +648,116 @@ def refine_borders(pos, nrm, idx, labels, max_edge=MAX_BORDER_EDGE):
     return np.array(pos_l), np.array(nrm_l, dtype=nrm.dtype), new_idx, len(pos_l) - len(pos)
 
 
-def label_mesh(pos, nrm, idx, lut):
+def label_mesh(pos, nrm, idx, lut, classify_fn=None):
+    classify_fn = classify_fn or classify
     """Label every vertex, refine edges that cross region borders until they
     are short, then clean up. The app draws each border as the smooth line
     halfway between differently-labelled vertices."""
     for _ in range(MAX_REFINE_ROUNDS):
-        lab = np.array([lut[s] for s in classify(pos)])
+        lab = np.array([lut[s] for s in classify_fn(pos)])
         pos, nrm, idx, added = refine_borders(pos, nrm, idx, smooth(lab, vertex_adjacency(idx, len(pos)), 1))
         if added == 0:
             break
-    raw = np.array([lut[s] for s in classify(pos)])
+    raw = np.array([lut[s] for s in classify_fn(pos)])
     adj = vertex_adjacency(idx, len(pos))
     lab = remove_islands(smooth(raw, adj, 2), adj)
     return pos, nrm, idx, raw, lab
 
 
+def body_classifier(body, mesh_pos):
+    """classify() for a given body: map to canonical coordinates first, then
+    apply body-specific extra regions."""
+    to_canon = make_canonical_mapper(body, mesh_pos)
+    apexes = breast_apexes(mesh_pos, classify(to_canon(mesh_pos))) if body == "female" else None
+
+    def fn(P):
+        names = classify(to_canon(P))
+        if apexes is not None:
+            names = add_breast(P, names, apexes)
+        return names
+
+    return fn
+
+
+BREAST_RADIUS = 0.15   # mesh units (~7.5 cm on the female body)
+BREAST_DEPTH = 0.13    # how far back from the apex the region reaches
+
+
+def breast_apexes(P, names):
+    """Most forward point of the chest on each side."""
+    out = {}
+    for side, sign in (("L", 1), ("R", -1)):
+        m = names == f"chest_{side}"
+        pts = P[m]
+        out[side] = pts[np.argmax(pts[:, 2])]
+    return out
+
+
+def add_breast(P, names, apexes):
+    """Female only: the rounded area around each chest apex becomes the breast
+    (taken from the chest and the adjoining rib regions)."""
+    names = names.copy()
+    for side, apex in apexes.items():
+        donors = np.isin(names, [f"chest_{side}", f"side_ribs_{side}", f"lower_ribs_front_{side}"])
+        near = (np.linalg.norm(P - apex, axis=1) < BREAST_RADIUS) & (P[:, 2] > apex[2] - BREAST_DEPTH)
+        names[donors & near] = f"breast_{side}"
+    return names
+
+
 def main():
-    # Region order is fixed by the classifier's full set of names on the base mesh.
     meshes = {}
-    all_names = set()
-    for name, fname in VARIANTS.items():
+    for body, fname in BODIES.items():
         d = np.load(CACHE / fname)
-        pos, nrm, idx = d["positions"].astype(np.float64), d["normals"], d["triangles"].astype(np.int64)
-        all_names |= set(classify(pos))
-        meshes[name] = (pos, nrm, idx)
+        meshes[body] = (d["positions"].astype(np.float64), d["normals"], d["triangles"].astype(np.int64))
+    classifiers = {b: body_classifier(b, m[0]) for b, m in meshes.items()}
+    # Region order: every name any body can produce (male order is a stable prefix-free sort).
+    all_names = set()
+    for b, (pos, _, _) in meshes.items():
+        all_names |= set(classifiers[b](pos))
     order = sorted(all_names)
     lut = {k: i for i, k in enumerate(order)}
 
     anchors = {}
-    for name, (pos, nrm, idx) in meshes.items():
+    for body, (pos, nrm, idx) in meshes.items():
         n0 = len(idx)
-        pos, nrm, idx, raw, labels = label_mesh(pos, nrm, idx, lut)
-        C = pos  # anchors work on vertices now
-        out = CACHE / f"regions_{name}"
+        pos, nrm, idx, raw, labels = label_mesh(pos, nrm, idx, lut, classifiers[body])
+        out = CACHE / f"regions_{body}"
         out.mkdir(parents=True, exist_ok=True)
         for f_ in out.glob("*.bin"):
             f_.unlink()
         for fname, arr, dt in (("positions", pos, "<f4"), ("normals", nrm, "<f4"),
                                ("region", labels, "<f4"), ("indices", idx, "<u4")):
             (out / f"{fname}.bin").write_bytes(np.ascontiguousarray(arr, dtype=dt).tobytes())
-        print(f"{name}: {len(order)} regions, {n0} -> {len(idx)} triangles / {len(pos)} vertices after border refinement")
-        for i, k in enumerate(order):
-            m = labels == i
-            if not m.any():
-                m = raw == i
-            if not m.any():
-                continue
-            pts = C[m]
+        present = sorted({order[i] for i in np.unique(labels)})
+        print(f"{body}: {len(present)} regions, {n0} -> {len(idx)} triangles / {len(pos)} vertices after border refinement")
+        anchors[body] = {}
+        for k in present:
+            m = labels == lut[k]
+            pts = pos[m]
             c = pts.mean(axis=0)
             best = pts[np.argmin(np.linalg.norm(pts - c, axis=1))]
-            anchors[k] = [round(float(v) * APP_SCALE, 4) for v in best]
+            anchors[body][k] = [round(float(v) * APP_SCALE, 4) for v in best]
         if "--preview" in sys.argv:
             face_lab = labels[idx[:, 0]]
-            preview(pos[idx].mean(axis=1), face_lab, order, pos, idx, out_dir=ROOT / f"scripts/preview/{name}")
+            preview(pos[idx].mean(axis=1), face_lab, order, pos, idx, out_dir=ROOT / f"scripts/preview/{body}")
 
-    missing = [k for k in order if k not in anchors]
-    assert not missing, f"regions without an anchor: {missing}"
     lines = [
         "// AUTO-GENERATED by scripts/build_regions.py. Do not edit by hand.",
         "// Index in REGION_ORDER == the _REGION vertex attribute baked into",
-        "// public/models/body.glb.",
+        "// public/models/body-<body>.glb.",
+        "",
+        f"export const BODY_TYPES = {json.dumps(list(BODIES))} as const;",
+        "export type BodyType = (typeof BODY_TYPES)[number];",
         "",
         f"export const REGION_ORDER = {json.dumps(order)} as const;",
         "",
-        "export const REGION_ANCHORS: Record<string, [number, number, number]> = {",
+        "/** Label anchor per region for each body; a region exists on a body iff it has an anchor. */",
+        "export const REGION_ANCHORS: Record<BodyType, Record<string, [number, number, number]>> = {",
     ]
-    lines += [f"  {json.dumps(k)}: {json.dumps(anchors[k])}," for k in order]
+    for body, a in anchors.items():
+        lines.append(f"  {body}: {{")
+        lines += [f"    {json.dumps(k)}: {json.dumps(v)}," for k, v in a.items()]
+        lines.append("  },")
     lines += ["};", ""]
     OUT_TS.write_text("\n".join(lines))
 

@@ -4,6 +4,7 @@ import { OrbitControls, Grid, Html, useProgress } from "@react-three/drei";
 import * as THREE from "three";
 import { Avatar } from "../scene/Avatar";
 import { FirstVisitHint } from "./FirstVisitHint";
+import { BodySwitch } from "./BodySwitch";
 import { useIsPhone, useMediaQuery } from "../hooks/useDevice";
 
 function LoadingIndicator() {
@@ -83,6 +84,7 @@ export function Viewer3D() {
           enableDamping
         />
       </Canvas>
+      <BodySwitch />
       <FirstVisitHint />
       <div className="viewer3d__controls">
         <button type="button" onClick={flip180}>

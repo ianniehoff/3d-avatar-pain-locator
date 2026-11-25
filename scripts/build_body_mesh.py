@@ -2,16 +2,16 @@
 """
 Step 1 of the model pipeline: prepare a smooth body mesh in Blender.
 
-Takes the "Man (HighPoly)" mesh from the source file, welds its vertices into
+Takes a body's HighPoly mesh ("Man (HighPoly)" / "Woman (HighPoly)") from the source file, welds its vertices into
 one connected surface, makes all faces point outward, applies one level of
 Catmull-Clark subdivision for a smoother silhouette and shading, triangulates,
 and writes the result (in glTF axes, the mesh's own local coordinates) to
-scripts/.cache/body_l<levels>.npz for scripts/build_regions.py.
+scripts/.cache/body_<body>_l<levels>.npz for scripts/build_regions.py.
 
 Needs Blender's Python module:  pip install bpy   (Python 3.13 for bpy 5.x)
 
-Run:  python3 scripts/build_body_mesh.py --levels 0   (welded, "standard")
-      python3 scripts/build_body_mesh.py --levels 1   (welded + smoothed)
+Run:  python3 scripts/build_body_mesh.py --body male     (welded; add --levels 1 to also subdivide)
+      python3 scripts/build_body_mesh.py --body female
 """
 import sys
 from pathlib import Path
@@ -22,11 +22,13 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "assets/source/HumanModels.glb"
-MESH_NAME = "Man (HighPoly)"
+MESH_NAMES = {"male": "Man (HighPoly)", "female": "Woman (HighPoly)"}
 WELD_DISTANCE = 1e-4
 
-levels = int(sys.argv[sys.argv.index("--levels") + 1]) if "--levels" in sys.argv else 1
-OUT = ROOT / f"scripts/.cache/body_l{levels}.npz"
+levels = int(sys.argv[sys.argv.index("--levels") + 1]) if "--levels" in sys.argv else 0
+body = sys.argv[sys.argv.index("--body") + 1] if "--body" in sys.argv else "male"
+MESH_NAME = MESH_NAMES[body]
+OUT = ROOT / f"scripts/.cache/body_{body}_l{levels}.npz"
 
 
 def blender_to_gltf(v):

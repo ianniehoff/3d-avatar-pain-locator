@@ -3,7 +3,8 @@
 // Keys are the region "base" ids produced by scripts/build_regions.py. Paired
 // regions (ids ending in _L / _R) share one entry here; `left` / `right` can
 // override fields where the two sides genuinely differ (e.g. organs under the
-// right vs left upper abdomen).
+// right vs left upper abdomen), and `male` / `female` where the two bodies do
+// (e.g. ovarian vs testicular causes). Order: shared, side, body, body+side.
 //
 // Content is intentionally educational/non-diagnostic: plain-language
 // descriptions plus conditions *commonly associated* with pain in the area.
@@ -29,6 +30,9 @@ export type BodyGroup =
   | "Thigh & knee"
   | "Lower leg, ankle & foot";
 
+export type RegionFields = Pick<RegionContent, "name" | "category" | "group" | "description" | "possibleCauses" | "redFlags">;
+type SideOverrides = { left?: Partial<RegionFields>; right?: Partial<RegionFields> };
+
 export interface RegionContent {
   name: string;
   category: RegionCategory;
@@ -36,8 +40,11 @@ export interface RegionContent {
   description: string;
   possibleCauses: string[];
   redFlags?: string[];
-  left?: Partial<Omit<RegionContent, "left" | "right">>;
-  right?: Partial<Omit<RegionContent, "left" | "right">>;
+  left?: Partial<RegionFields>;
+  right?: Partial<RegionFields>;
+  /** Body-specific overrides (applied after left/right), which can themselves differ by side. */
+  male?: Partial<RegionFields> & SideOverrides;
+  female?: Partial<RegionFields> & SideOverrides;
 }
 
 const HEART_ATTACK =
@@ -218,6 +225,17 @@ export const REGION_CONTENT: Record<string, RegionContent> = {
     group: "Shoulder & arm",
     description: "The back of the shoulder joint, over the rear deltoid and the infraspinatus/teres minor.",
     possibleCauses: ["Rotator cuff strain", "Posterior deltoid strain", "Shoulder impingement", "Referred pain from the neck"],
+  },
+  armpit: {
+    name: "Armpit",
+    category: "region",
+    group: "Shoulder & arm",
+    description: "The hollow under the shoulder (axilla), where lymph nodes, nerves, and blood vessels pass into the arm.",
+    possibleCauses: ["Muscle strain (pectoral or latissimus)", "Swollen lymph nodes", "Ingrown hair or skin irritation", "Hidradenitis suppurativa"],
+    redFlags: ["A hard, painless, or growing lump in the armpit should be checked by a doctor."],
+    female: {
+      possibleCauses: ["Muscle strain (pectoral or latissimus)", "Swollen lymph nodes", "Breast tissue extending into the armpit (cyclical pain)", "Ingrown hair or skin irritation"],
+    },
   },
   biceps: {
     name: "Biceps",
@@ -434,6 +452,30 @@ export const REGION_CONTENT: Record<string, RegionContent> = {
     redFlags: [HEART_ATTACK],
     right: { redFlags: ["Sharp chest pain that is worse with breathing and comes with shortness of breath needs urgent care."] },
   },
+  breast: {
+    name: "Breast",
+    category: "region",
+    group: "Chest & abdomen",
+    description: "The breast tissue on the front of the chest, over the pectoral muscle.",
+    possibleCauses: [
+      "Cyclical breast pain (linked to the menstrual cycle)",
+      "Breast cyst",
+      "Mastitis (often while breastfeeding)",
+      "Chest wall or pectoral muscle strain",
+      "Costochondritis (felt under the breast)",
+    ],
+    redFlags: [
+      "A new lump, skin dimpling or puckering, nipple changes, or bloody nipple discharge should be checked by a doctor.",
+      "A red, hot, painful breast with fever needs prompt care.",
+    ],
+    left: {
+      redFlags: [
+        "A new lump, skin dimpling or puckering, nipple changes, or bloody nipple discharge should be checked by a doctor.",
+        "A red, hot, painful breast with fever needs prompt care.",
+        HEART_ATTACK,
+      ],
+    },
+  },
   lower_ribs_front: {
     name: "Lower Ribs (Front)",
     category: "bone",
@@ -494,14 +536,32 @@ export const REGION_CONTENT: Record<string, RegionContent> = {
     right: {
       name: "Lower Right Abdomen",
       description: "The lower right abdomen, over the appendix and part of the large intestine.",
-      possibleCauses: ["Appendicitis", "Gas or constipation", "Ovarian cyst", "Kidney stone", "Inguinal hernia"],
+      possibleCauses: ["Appendicitis", "Gas or constipation", "Kidney stone", "Inguinal hernia"],
       redFlags: ["Worsening pain here, especially with fever, vomiting, or pain when walking or coughing, can be appendicitis. Seek prompt care."],
     },
     left: {
       name: "Lower Left Abdomen",
       description: "The lower left abdomen, over the descending and sigmoid colon.",
-      possibleCauses: ["Constipation or gas", "Diverticulitis", "Ovarian cyst", "Kidney stone", "Inguinal hernia"],
+      possibleCauses: ["Constipation or gas", "Diverticulitis", "Kidney stone", "Inguinal hernia"],
       redFlags: ["Severe pain here with fever or blood in the stool needs prompt care."],
+    },
+    female: {
+      right: {
+        description: "The lower right abdomen, over the appendix, part of the large intestine, and the right ovary.",
+        possibleCauses: ["Appendicitis", "Ovarian cyst", "Ovulation pain", "Gas or constipation", "Kidney stone"],
+        redFlags: [
+          "Worsening pain here, especially with fever, vomiting, or pain when walking or coughing, can be appendicitis. Seek prompt care.",
+          "Sudden severe one-sided pain, especially with a possible pregnancy or vaginal bleeding, can be an ectopic pregnancy or ovarian torsion. Seek emergency care.",
+        ],
+      },
+      left: {
+        description: "The lower left abdomen, over the descending colon and the left ovary.",
+        possibleCauses: ["Constipation or gas", "Ovarian cyst", "Ovulation pain", "Diverticulitis", "Kidney stone"],
+        redFlags: [
+          "Severe pain here with fever or blood in the stool needs prompt care.",
+          "Sudden severe one-sided pain, especially with a possible pregnancy or vaginal bleeding, can be an ectopic pregnancy or ovarian torsion. Seek emergency care.",
+        ],
+      },
     },
   },
   lower_abdomen_center: {
@@ -509,15 +569,30 @@ export const REGION_CONTENT: Record<string, RegionContent> = {
     category: "organ",
     group: "Chest & abdomen",
     description: "The lower-center abdomen above the pubic bone, over the bladder.",
-    possibleCauses: ["Bladder infection (UTI)", "Menstrual cramps", "Constipation", "Pelvic inflammation"],
+    possibleCauses: ["Bladder infection (UTI)", "Constipation", "Bladder irritation"],
     redFlags: ["Inability to urinate with lower abdominal pain needs urgent care."],
+    female: {
+      description: "The lower-center abdomen above the pubic bone, over the bladder and uterus.",
+      possibleCauses: ["Menstrual cramps", "Bladder infection (UTI)", "Endometriosis", "Pelvic inflammatory disease", "Uterine fibroids"],
+      redFlags: [
+        "Pelvic pain with a possible pregnancy, heavy bleeding, or fever needs prompt care.",
+        "Inability to urinate with lower abdominal pain needs urgent care.",
+      ],
+    },
+    male: {
+      description: "The lower-center abdomen above the pubic bone, over the bladder and prostate.",
+      possibleCauses: ["Bladder infection (UTI)", "Prostatitis", "Constipation", "Bladder stones"],
+    },
   },
   pubic: {
     name: "Pubic Area",
     category: "bone",
     group: "Hip & pelvis",
     description: "The front of the pelvis at the pubic bone and symphysis joint.",
-    possibleCauses: ["Osteitis pubis", "Adductor strain", "Pregnancy-related pelvic girdle pain", "Bladder problems"],
+    possibleCauses: ["Osteitis pubis", "Adductor strain", "Bladder problems"],
+    female: {
+      possibleCauses: ["Pregnancy-related pelvic girdle pain", "Osteitis pubis", "Adductor strain", "Bladder problems"],
+    },
   },
   groin: {
     name: "Groin",
@@ -525,7 +600,14 @@ export const REGION_CONTENT: Record<string, RegionContent> = {
     group: "Hip & pelvis",
     description: "The crease between the lower abdomen and the thigh, where the inguinal canal runs.",
     possibleCauses: ["Inguinal hernia", "Groin (adductor) strain", "Hip joint problems", "Swollen lymph nodes"],
-    redFlags: ["A painful bulge that can't be pushed back in, or sudden severe testicular pain, needs emergency care."],
+    redFlags: ["A painful bulge that can't be pushed back in needs emergency care."],
+    male: {
+      possibleCauses: ["Inguinal hernia", "Groin (adductor) strain", "Pain spreading from the testicle", "Hip joint problems", "Swollen lymph nodes"],
+      redFlags: ["A painful bulge that can't be pushed back in, or sudden severe testicular pain (possible torsion), needs emergency care."],
+    },
+    female: {
+      possibleCauses: ["Groin (adductor) strain", "Round ligament pain (pregnancy)", "Inguinal or femoral hernia", "Hip joint problems", "Swollen lymph nodes"],
+    },
   },
   flank: {
     name: "Flank",
@@ -596,6 +678,9 @@ export const REGION_CONTENT: Record<string, RegionContent> = {
     group: "Back",
     description: "The muscles beside the lower spine (erector spinae and quadratus lumborum).",
     possibleCauses: ["Muscle strain or spasm", "Facet joint irritation", "Poor lifting technique", "Sciatica"],
+    female: {
+      possibleCauses: ["Muscle strain or spasm", "Facet joint irritation", "Menstrual cramps or endometriosis (felt in the back)", "Pregnancy", "Sciatica"],
+    },
   },
   sacrum: {
     name: "Sacrum",
@@ -609,7 +694,10 @@ export const REGION_CONTENT: Record<string, RegionContent> = {
     category: "joint",
     group: "Back",
     description: "The sacroiliac joint, where the sacrum meets the pelvis, under the dimple of the lower back.",
-    possibleCauses: ["Sacroiliac joint dysfunction", "Sacroiliitis", "Pregnancy-related pelvic pain", "Ankylosing spondylitis"],
+    possibleCauses: ["Sacroiliac joint dysfunction", "Sacroiliitis", "Ankylosing spondylitis"],
+    female: {
+      possibleCauses: ["Sacroiliac joint dysfunction", "Pregnancy-related pelvic pain", "Sacroiliitis", "Ankylosing spondylitis"],
+    },
   },
   tailbone: {
     name: "Tailbone (Coccyx)",

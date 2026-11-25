@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { BODY_GROUPS, REGIONS } from "../data/regions";
+import { BODY_GROUPS, REGIONS_BY_BODY } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
 
 /** Keyboard/screen-reader friendly way to reach the same info without pointer-based 3D interaction.
@@ -8,10 +8,12 @@ export function RegionListFallback({ embedded = false, onPick }: { embedded?: bo
   const [query, setQuery] = useState("");
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
   const setSelected = useSelectionStore((s) => s.setSelected);
+  const body = useSelectionStore((s) => s.body);
+  const regions = REGIONS_BY_BODY[body];
 
   const grouped = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const matches = REGIONS.filter(
+    const matches = regions.filter(
       (r) =>
         !q ||
         r.name.toLowerCase().includes(q) ||
@@ -21,9 +23,9 @@ export function RegionListFallback({ embedded = false, onPick }: { embedded?: bo
     return BODY_GROUPS.map((g) => ({ group: g, regions: matches.filter((r) => r.group === g) })).filter(
       (g) => g.regions.length > 0,
     );
-  }, [query]);
+  }, [query, regions]);
 
-  const body = (
+  const listBody = (
       <div className="region-list__body">
         <label htmlFor="region-search" className="visually-hidden">
           Search body areas or conditions
@@ -70,16 +72,16 @@ export function RegionListFallback({ embedded = false, onPick }: { embedded?: bo
   if (embedded) {
     return (
       <section className="region-list region-list--embedded" aria-label="All body areas">
-        <h3 className="region-list__title">Browse all {REGIONS.length} body areas</h3>
-        {body}
+        <h3 className="region-list__title">Browse all {regions.length} body areas</h3>
+        {listBody}
       </section>
     );
   }
 
   return (
     <details className="region-list">
-      <summary>Or browse all {REGIONS.length} body areas</summary>
-      {body}
+      <summary>Or browse all {regions.length} body areas</summary>
+      {listBody}
     </details>
   );
 }

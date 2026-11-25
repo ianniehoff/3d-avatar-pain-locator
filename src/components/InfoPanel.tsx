@@ -1,4 +1,4 @@
-import { REGIONS_BY_ID } from "../data/regions";
+import { getRegion } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
 import { useIsTouch } from "../hooks/useDevice";
 import { RegionDetails } from "./RegionDetails";
@@ -8,7 +8,8 @@ export function InfoPanel() {
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
   const setSelected = useSelectionStore((s) => s.setSelected);
   const isTouch = useIsTouch();
-  const region = selectedRegionId ? REGIONS_BY_ID[selectedRegionId] : null;
+  const body = useSelectionStore((s) => s.body);
+  const region = getRegion(body, selectedRegionId);
 
   if (!region) {
     return (

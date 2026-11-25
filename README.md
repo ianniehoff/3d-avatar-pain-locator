@@ -36,21 +36,24 @@ npm install
 npm run dev
 \`\`\`
 
-## Body Model & Region Map
+## Body Models & Region Map
 
-The app ships small, compressed body models built from the original asset (`assets/source/HumanModels.glb`, not served) by a three-step pipeline:
+The app ships two small, compressed body models (male and female) built from the original asset (`assets/source/HumanModels.glb`, not served) by this pipeline:
 
-1. `scripts/build_body_mesh.py` (Blender, via `pip install bpy`): welds the high-poly body into one closed surface and fixes face orientation (`--levels 1` adds subdivision smoothing; we ship level 0, since the visual gain didn't justify 6x the triangles).
-2. `scripts/build_regions.py` (numpy + scipy): assigns every vertex to one of ~200 anatomical regions using joint landmarks from the model's skeleton plus hand-tuned geometric rules, splits edges that cross a region border until they're about 1 cm long, and merges stray fragments so every region is one connected patch. The app's shader then draws each border as a smooth line through the middle of those triangles. Also writes `src/data/regionMap.generated.ts`.
-3. `scripts/pack_models.mjs` (gltf-transform): writes `public/models/body.glb` (~340 KB) with the region data baked in as vertex attributes, quantized and meshopt-compressed.
+1. `scripts/extract_landmarks.mjs`: reads both skeletons and writes their joint positions, in each high-poly mesh's own coordinates, to `scripts/landmarks.json`.
+2. `scripts/build_body_mesh.py --body male|female` (Blender, via `pip install bpy`): welds the body into one closed surface and fixes face orientation.
+3. `scripts/build_regions.py` (numpy + scipy): assigns every vertex to an anatomical region (~200 per body). The rules are written in the male body's coordinates; other bodies are first mapped onto the male body bone by bone (and torso slice by slice) using both skeletons, so the same rules apply. The female body also gets breast regions. Edges crossing a region border are split until about 1 cm long and stray fragments are merged, so each region is one clean patch. Also writes `src/data/regionMap.generated.ts`.
+4. `scripts/pack_models.mjs` (gltf-transform): writes `public/models/body-male.glb` (~340 KB) and `body-female.glb` (~230 KB) with the region index baked in per vertex, quantized and meshopt-compressed.
 
 ```bash
-python3 scripts/build_body_mesh.py --levels 0
-python3 scripts/build_regions.py [--preview]     # --preview renders region PNGs (needs matplotlib)
+node scripts/extract_landmarks.mjs
+python3 scripts/build_body_mesh.py --body male
+python3 scripts/build_body_mesh.py --body female
+python3 scripts/build_regions.py [--preview]   # --preview renders region PNGs (needs matplotlib)
 node scripts/pack_models.mjs
 ```
 
-The educational content for each region lives in `src/data/regionContent.ts`.
+The educational content for each region lives in `src/data/regionContent.ts`, with optional left/right and male/female overrides.
 
 ## Status
 

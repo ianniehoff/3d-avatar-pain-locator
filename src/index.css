@@ -629,3 +629,42 @@ body {
 .phone-sheet .attribution {
   margin-top: 16px;
 }
+
+/* ------------------------------------------------------------ body switch */
+.body-switch {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  display: flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.body-switch button {
+  font: inherit;
+  font-size: 13px;
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 12px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.body-switch button.is-active {
+  background: var(--text);
+  color: var(--surface);
+  font-weight: 600;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .body-switch button {
+    min-height: 36px;
+    padding: 6px 14px;
+    font-size: 14px;
+  }
+}

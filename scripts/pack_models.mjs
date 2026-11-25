@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Step 3 of the model pipeline: turn the arrays written by
- * scripts/build_regions.py into the small, compressed public/models/body.glb.
+ * scripts/build_regions.py into small, compressed public/models/body-<body>.glb files.
  *
  * Each output holds one mesh ("Body") with
  *   POSITION, NORMAL          quantized (KHR_mesh_quantization)
@@ -21,7 +21,7 @@ import { MeshoptDecoder, MeshoptEncoder } from "meshoptimizer";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE = join(ROOT, "assets/source/HumanModels.glb");
 const CACHE = join(ROOT, "scripts/.cache");
-const VARIANTS = ["standard"];
+const VARIANTS = ["male", "female"];
 
 await MeshoptDecoder.ready;
 await MeshoptEncoder.ready;
@@ -68,7 +68,7 @@ for (const variant of VARIANTS) {
     meshopt({ encoder: MeshoptEncoder, level: "medium" }),
   );
 
-  const out = join(ROOT, "public/models/body.glb");
+  const out = join(ROOT, `public/models/body-${variant}.glb`);
   await io.write(out, doc);
   const kb = (statSync(out).size / 1024).toFixed(0);
   console.log(`${variant}: ${prim.getIndices().getCount() / 3} triangles -> ${out.replace(ROOT + "/", "")} (${kb} KB)`);

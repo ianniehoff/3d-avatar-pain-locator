@@ -2,14 +2,17 @@ import { useCallback, useMemo, useRef } from "react";
 import { Bvh, useGLTF } from "@react-three/drei";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
-import { REGIONS } from "../data/regions";
+import { REGION_ID_BY_INDEX, REGION_INDEX_BY_ID, type BodyType } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
 import { isTouchDevice } from "../hooks/useDevice";
 
 // Built by the pipeline in scripts/ (see README): a compressed body mesh with
 // a region index per vertex (_REGION) baked in. Edges that cross a region
 // border are pre-refined to ~1cm so borders drawn through them look smooth.
-const MODEL_URL = "/models/body.glb";
+const MODEL_URLS: Record<BodyType, string> = {
+  male: "/models/body-male.glb",
+  female: "/models/body-female.glb",
+};
 // Source mesh units -> our scene's ~1.75m convention.
 const SOURCE_HEIGHT = 3.495;
 const TARGET_HEIGHT = 1.75;
@@ -28,9 +31,6 @@ const EDGE_SOFTNESS = 1.5;
 
 const TMP = new THREE.Vector3();
 
-const REGION_INDEX_BY_ID: Record<string, number> = Object.fromEntries(
-  REGIONS.map((r, i) => [r.id, i]),
-);
 
 interface GLTFResult {
   nodes: { Body: THREE.Mesh };
@@ -45,24 +45,24 @@ interface RegionShader {
   };
 }
 
-export function HumanMesh() {
-  const { nodes } = useGLTF(MODEL_URL) as unknown as GLTFResult;
-  const body = nodes.Body;
+export function HumanMesh({ body }: { body: BodyType }) {
+  const { nodes } = useGLTF(MODEL_URLS[body]) as unknown as GLTFResult;
+  const bodyNode = nodes.Body;
   const setHovered = useSelectionStore((s) => s.setHovered);
   const setSelected = useSelectionStore((s) => s.setSelected);
   const shaderRef = useRef<RegionShader | null>(null);
 
   const geometry = useMemo(() => {
-    const geo = body.geometry;
+    const geo = bodyNode.geometry;
     // GLTFLoader exposes custom attributes lower-cased; give them shader-safe names.
     if (!geo.getAttribute("regionId")) {
       geo.setAttribute("regionId", geo.getAttribute("_region"));
     }
     return geo;
-  }, [body]);
+  }, [bodyNode]);
 
   const material = useMemo(() => {
-    const mat = (body.material as THREE.MeshStandardMaterial).clone();
+    const mat = (bodyNode.material as THREE.MeshStandardMaterial).clone();
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uHoverIndex = { value: -1 };
       shader.uniforms.uHoverStrength = { value: 0 };
@@ -115,7 +115,7 @@ export function HumanMesh() {
       shaderRef.current = shader as unknown as RegionShader;
     };
     return mat;
-  }, [body]);
+  }, [bodyNode]);
 
   useFrame((_, delta) => {
     const shader = shaderRef.current;
@@ -151,7 +151,7 @@ export function HumanMesh() {
         }
       }
       const regionIndex = Math.round(geometry.getAttribute("regionId").getX(best));
-      return REGIONS[regionIndex]?.id ?? null;
+      return REGION_ID_BY_INDEX[regionIndex] ?? null;
     },
     [geometry],
   );
@@ -186,15 +186,15 @@ export function HumanMesh() {
 
   return (
     <group scale={SCALE}>
-      {/* BVH keeps pointer hit-testing fast on the ~77k-triangle mesh. */}
+      {/* BVH keeps pointer hit-testing fast on the ~57k-triangle mesh. */}
       <Bvh firstHitOnly>
         <mesh
           geometry={geometry}
           material={material}
           // Quantized meshes carry a node transform that maps them back to source units.
-          position={body.position}
-          quaternion={body.quaternion}
-          scale={body.scale}
+          position={bodyNode.position}
+          quaternion={bodyNode.quaternion}
+          scale={bodyNode.scale}
           onPointerMove={onPointerMove}
           onPointerOut={onPointerOut}
           onClick={onClick}
@@ -204,4 +204,4 @@ export function HumanMesh() {
   );
 }
 
-useGLTF.preload(MODEL_URL);
+// Only the chosen body is downloaded; the other loads if the user switches.

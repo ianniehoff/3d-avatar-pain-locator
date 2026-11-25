@@ -1,5 +1,5 @@
 import { Html } from "@react-three/drei";
-import { REGIONS_BY_ID } from "../data/regions";
+import { getRegion } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
 import { useIsTouch } from "../hooks/useDevice";
 
@@ -11,7 +11,8 @@ export function RegionMarker() {
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
   const isTouch = useIsTouch();
   const id = hoveredRegionId ?? (isTouch ? selectedRegionId : null);
-  const region = id ? REGIONS_BY_ID[id] : null;
+  const body = useSelectionStore((s) => s.body);
+  const region = getRegion(body, id);
   if (!region) return null;
   return (
     <group position={region.anchor}>
