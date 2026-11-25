@@ -7,6 +7,7 @@ Where the 3D Pain Locator goes next. Phases are roughly in order of payoff for e
 - [x] Crisp whole-region hover highlight, persistent tint on the selected region
 - [x] Content for all 108 region types, with left/right differences and red flags
 - [x] Searchable list grouped by body area, searchable by condition
+- [x] Phase 1 (smoothing, mobile, load speed, region borders), shipped 2026-11-24
 
 ---
 
@@ -14,12 +15,12 @@ Where the 3D Pain Locator goes next. Phases are roughly in order of payoff for e
 
 Make it feel like a finished product.
 
-- [ ] Fix lighting and skin material (currently dark and flat)
-- [ ] Mobile: tap to preview, tap again to select, bottom-sheet info panel
-- [ ] Compress the 6.4 MB model (Draco/meshopt, target ~1 MB) and code-split the bundle
-- [ ] "Fly to": selecting an area from the list rotates and zooms the camera to it
-- [ ] Shareable deep links, e.g. `?region=lateral_elbow_L`
-- [ ] Smooth the remaining jagged region borders (torso, fingers)
+- [x] Smooth out the body: welded the mesh into one surface in Blender, which removed the striped/faceted shading (color kept as is; subdivision tested and skipped as not worth 6x the triangles)
+- [x] Mobile: phones get a full-screen model with a Maps-style bottom sheet (peek card, swipe up for details, list inside), tablets keep side-by-side with touch behavior, first-visit hint on all devices
+- [x] Faster loading: body-only meshopt-compressed model (6.4 MB -> 340 KB), 3D viewer code-split into its own chunk, loading indicator
+- [ ] "Fly to": selecting an area from the list rotates and zooms the camera to it (deferred)
+- [ ] Shareable deep links, e.g. `?region=lateral_elbow_L` (deferred)
+- [x] Clean region borders: per-vertex regions drawn as anti-aliased lines, border edges refined to ~1 cm, every region one connected patch
 
 ## Phase 2: Female body
 

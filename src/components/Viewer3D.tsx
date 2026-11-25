@@ -3,6 +3,8 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Grid, Html, useProgress } from "@react-three/drei";
 import * as THREE from "three";
 import { Avatar } from "../scene/Avatar";
+import { FirstVisitHint } from "./FirstVisitHint";
+import { useIsPhone, useMediaQuery } from "../hooks/useDevice";
 
 function LoadingIndicator() {
   const { progress } = useProgress();
@@ -16,12 +18,18 @@ function LoadingIndicator() {
 }
 
 const TARGET = new THREE.Vector3(0, 0.85, 0);
+// Phones are tall and narrow: back the camera off so the arms fit, and aim a
+// little lower so the body sits above the bottom sheet.
+const PHONE_TARGET = new THREE.Vector3(0, 0.72, 0);
 const MIN_TARGET_Y = 0.0;
 const MAX_TARGET_Y = 1.65;
 const PAN_STEP = 0.22;
 
 export function Viewer3D() {
   const controlsRef = useRef<any>(null);
+  const isPhone = useIsPhone();
+  // Tablet-width viewers are narrower than they are tall too.
+  const isNarrow = useMediaQuery("(max-width: 1023px)");
 
   const flip180 = () => {
     const controls = controlsRef.current;
@@ -49,7 +57,7 @@ export function Viewer3D() {
 
   return (
     <div className="viewer3d">
-      <Canvas camera={{ position: [0, 1.0, 3.4], fov: 32 }} shadows={false}>
+      <Canvas camera={{ position: isPhone ? [0, 0.95, 4.6] : isNarrow ? [0, 1.0, 4.1] : [0, 1.0, 3.4], fov: 32 }} shadows={false}>
         <ambientLight intensity={1.6} />
         <hemisphereLight args={["#ffffff", "#a06a3c", 1.0]} />
         <directionalLight position={[2, 3, 2]} intensity={0.45} />
@@ -67,14 +75,15 @@ export function Viewer3D() {
         />
         <OrbitControls
           ref={controlsRef}
-          target={TARGET}
+          target={isPhone ? PHONE_TARGET : TARGET}
           enablePan
           minDistance={0.35}
-          maxDistance={4.5}
+          maxDistance={isPhone ? 6 : 4.5}
           maxPolarAngle={Math.PI * 0.85}
           enableDamping
         />
       </Canvas>
+      <FirstVisitHint />
       <div className="viewer3d__controls">
         <button type="button" onClick={flip180}>
           Flip front / back

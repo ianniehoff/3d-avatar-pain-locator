@@ -4,6 +4,7 @@ import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import { REGIONS } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
+import { isTouchDevice } from "../hooks/useDevice";
 
 // Built by the pipeline in scripts/ (see README): a compressed body mesh with
 // a region index per vertex (_REGION) baked in. Edges that cross a region
@@ -158,6 +159,8 @@ export function HumanMesh() {
   const onPointerMove = useCallback(
     (e: ThreeEvent<PointerEvent>) => {
       e.stopPropagation();
+      // No hover on touch screens: a moving finger is rotating the model.
+      if (e.nativeEvent.pointerType === "touch") return;
       setHovered(regionAt(e));
     },
     [regionAt, setHovered],
@@ -174,8 +177,8 @@ export function HumanMesh() {
   const onClick = useCallback(
     (e: ThreeEvent<MouseEvent>) => {
       e.stopPropagation();
-      // Ignore clicks that were really the end of an orbit drag.
-      if (e.delta > 4) return;
+      // Ignore clicks that were really the end of an orbit drag (fingers wobble more).
+      if (e.delta > (isTouchDevice() ? 12 : 4)) return;
       setSelected(regionAt(e));
     },
     [regionAt, setSelected],

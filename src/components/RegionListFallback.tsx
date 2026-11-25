@@ -2,8 +2,9 @@ import { useMemo, useState } from "react";
 import { BODY_GROUPS, REGIONS } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
 
-/** Keyboard/screen-reader friendly way to reach the same info without pointer-based 3D interaction. */
-export function RegionListFallback() {
+/** Keyboard/screen-reader friendly way to reach the same info without pointer-based 3D interaction.
+ *  `embedded` renders the list directly (phone sheet) instead of inside a collapsible <details>. */
+export function RegionListFallback({ embedded = false, onPick }: { embedded?: boolean; onPick?: () => void } = {}) {
   const [query, setQuery] = useState("");
   const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
   const setSelected = useSelectionStore((s) => s.setSelected);
@@ -22,9 +23,7 @@ export function RegionListFallback() {
     );
   }, [query]);
 
-  return (
-    <details className="region-list">
-      <summary>Or browse all {REGIONS.length} body areas</summary>
+  const body = (
       <div className="region-list__body">
         <label htmlFor="region-search" className="visually-hidden">
           Search body areas or conditions
@@ -51,7 +50,10 @@ export function RegionListFallback() {
                           ? "region-list__item region-list__item--active"
                           : "region-list__item"
                       }
-                      onClick={() => setSelected(region.id)}
+                      onClick={() => {
+                        setSelected(region.id);
+                        onPick?.();
+                      }}
                     >
                       {region.name}
                     </button>
@@ -63,6 +65,21 @@ export function RegionListFallback() {
           {grouped.length === 0 && <p className="region-list__empty">No matches.</p>}
         </div>
       </div>
+  );
+
+  if (embedded) {
+    return (
+      <section className="region-list region-list--embedded" aria-label="All body areas">
+        <h3 className="region-list__title">Browse all {REGIONS.length} body areas</h3>
+        {body}
+      </section>
+    );
+  }
+
+  return (
+    <details className="region-list">
+      <summary>Or browse all {REGIONS.length} body areas</summary>
+      {body}
     </details>
   );
 }

@@ -1,18 +1,22 @@
 import { Html } from "@react-three/drei";
 import { REGIONS_BY_ID } from "../data/regions";
 import { useSelectionStore } from "../state/selectionStore";
+import { useIsTouch } from "../hooks/useDevice";
 
-/** Floating name label for the region under the pointer. The hovered and
- *  selected regions themselves are tinted directly on the mesh surface
- *  (see scene/HumanMesh.tsx), so this only needs to carry the text. */
+/** Floating name label on the model: the region under the mouse, or on touch
+ *  screens (which have no hover) the region that was tapped. The regions
+ *  themselves are tinted on the mesh surface (see scene/HumanMesh.tsx). */
 export function RegionMarker() {
   const hoveredRegionId = useSelectionStore((s) => s.hoveredRegionId);
-  const hoveredRegion = hoveredRegionId ? REGIONS_BY_ID[hoveredRegionId] : null;
-  if (!hoveredRegion) return null;
+  const selectedRegionId = useSelectionStore((s) => s.selectedRegionId);
+  const isTouch = useIsTouch();
+  const id = hoveredRegionId ?? (isTouch ? selectedRegionId : null);
+  const region = id ? REGIONS_BY_ID[id] : null;
+  if (!region) return null;
   return (
-    <group position={hoveredRegion.anchor}>
+    <group position={region.anchor}>
       <Html occlude={false} style={{ pointerEvents: "none" }} zIndexRange={[10, 0]}>
-        <div className="region-hover-label">{hoveredRegion.name}</div>
+        <div className="region-hover-label">{region.name}</div>
       </Html>
     </group>
   );
