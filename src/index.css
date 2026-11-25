@@ -353,31 +353,6 @@ body {
   white-space: nowrap;
 }
 
-.viewer3d__variant {
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  display: flex;
-  border: 1px solid var(--border, #d9d9de);
-  border-radius: 8px;
-  overflow: hidden;
-  background: #fff;
-  z-index: 2;
-}
-
-.viewer3d__variant button {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  padding: 6px 12px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.viewer3d__variant button.is-active {
-  background: #2b2b33;
-  color: #fff;
-}
 
 .viewer3d__loading {
   white-space: nowrap;

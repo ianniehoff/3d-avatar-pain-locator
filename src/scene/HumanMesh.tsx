@@ -3,15 +3,12 @@ import { Bvh, useGLTF } from "@react-three/drei";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import { REGIONS } from "../data/regions";
-import { useSelectionStore, type MeshVariant } from "../state/selectionStore";
+import { useSelectionStore } from "../state/selectionStore";
 
-// Built by the pipeline in scripts/ (see README): one compressed mesh per
-// variant with a per-triangle region index (_REGION) and each vertex's
-// distance to the edge of its region (_BORDER) baked in.
-export const MODEL_URLS: Record<MeshVariant, string> = {
-  standard: "/models/body-standard.glb",
-  smooth: "/models/body-smooth.glb",
-};
+// Built by the pipeline in scripts/ (see README): a compressed body mesh with
+// a region index per vertex (_REGION) baked in. Edges that cross a region
+// border are pre-refined to ~1cm so borders drawn through them look smooth.
+const MODEL_URL = "/models/body.glb";
 // Source mesh units -> our scene's ~1.75m convention.
 const SOURCE_HEIGHT = 3.495;
 const TARGET_HEIGHT = 1.75;
@@ -22,10 +19,13 @@ const SELECTED_COLOR = new THREE.Color("#e0463f");
 const HOVER_MAX_STRENGTH = 0.65;
 const SELECTED_STRENGTH = 0.5;
 const LERP_SPEED = 12;
-// Highlights fade in over this distance (mesh units, ~1cm) from a region's
-// edge, and never drop below EDGE_FLOOR so thin regions (fingers) stay visible.
-const FEATHER = 0.02;
-const EDGE_FLOOR = 0.3;
+// Each vertex sends 1 (in the highlighted region) or 0 (not) to the GPU,
+// which interpolates it across triangles; the border is drawn where the value
+// crosses 0.5, i.e. a smooth line through the middle of border triangles.
+// EDGE_SOFTNESS widens the anti-aliased transition slightly.
+const EDGE_SOFTNESS = 1.5;
+
+const TMP = new THREE.Vector3();
 
 const REGION_INDEX_BY_ID: Record<string, number> = Object.fromEntries(
   REGIONS.map((r, i) => [r.id, i]),
@@ -44,8 +44,8 @@ interface RegionShader {
   };
 }
 
-export function HumanMesh({ variant }: { variant: MeshVariant }) {
-  const { nodes } = useGLTF(MODEL_URLS[variant]) as unknown as GLTFResult;
+export function HumanMesh() {
+  const { nodes } = useGLTF(MODEL_URL) as unknown as GLTFResult;
   const body = nodes.Body;
   const setHovered = useSelectionStore((s) => s.setHovered);
   const setSelected = useSelectionStore((s) => s.setSelected);
@@ -56,7 +56,6 @@ export function HumanMesh({ variant }: { variant: MeshVariant }) {
     // GLTFLoader exposes custom attributes lower-cased; give them shader-safe names.
     if (!geo.getAttribute("regionId")) {
       geo.setAttribute("regionId", geo.getAttribute("_region"));
-      geo.setAttribute("borderDist", geo.getAttribute("_border"));
     }
     return geo;
   }, [body]);
@@ -76,40 +75,38 @@ export function HumanMesh({ variant }: { variant: MeshVariant }) {
           "#include <common>",
           `#include <common>
           attribute float regionId;
-          attribute float borderDist;
-          varying float vRegionId;
-          varying float vBorderDist;`,
+          uniform float uHoverIndex;
+          uniform float uSelectedIndex;
+          varying float vInHover;
+          varying float vInSelected;`,
         )
         .replace(
           "#include <begin_vertex>",
           `#include <begin_vertex>
-          vRegionId = regionId;
-          vBorderDist = borderDist;`,
+          vInHover = abs(regionId - uHoverIndex) < 0.5 ? 1.0 : 0.0;
+          vInSelected = abs(regionId - uSelectedIndex) < 0.5 ? 1.0 : 0.0;`,
         );
 
       shader.fragmentShader = shader.fragmentShader
         .replace(
           "#include <common>",
           `#include <common>
-          varying float vRegionId;
-          varying float vBorderDist;
-          uniform float uHoverIndex;
+          varying float vInHover;
+          varying float vInSelected;
           uniform float uHoverStrength;
           uniform vec3 uHoverColor;
-          uniform float uSelectedIndex;
           uniform float uSelectedStrength;
-          uniform vec3 uSelectedColor;`,
+          uniform vec3 uSelectedColor;
+          float regionMask(float v) {
+            float w = max(fwidth(v) * ${EDGE_SOFTNESS.toFixed(1)}, 0.001);
+            return smoothstep(0.5 - w, 0.5 + w, v);
+          }`,
         )
         .replace(
           "#include <dithering_fragment>",
           `
-          float edge = mix(${EDGE_FLOOR.toFixed(2)}, 1.0, smoothstep(0.0, ${FEATHER.toFixed(3)}, vBorderDist));
-          if (abs(vRegionId - uSelectedIndex) < 0.5) {
-            gl_FragColor.rgb = mix(gl_FragColor.rgb, uSelectedColor, uSelectedStrength * edge);
-          }
-          if (abs(vRegionId - uHoverIndex) < 0.5) {
-            gl_FragColor.rgb = mix(gl_FragColor.rgb, uHoverColor, uHoverStrength * edge);
-          }
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, uSelectedColor, uSelectedStrength * regionMask(vInSelected));
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, uHoverColor, uHoverStrength * regionMask(vInHover));
           #include <dithering_fragment>
           `,
         );
@@ -136,12 +133,23 @@ export function HumanMesh({ variant }: { variant: MeshVariant }) {
     u.uSelectedStrength.value += ((selectedIndex >= 0 ? SELECTED_STRENGTH : 0) - u.uSelectedStrength.value) * k;
   });
 
+  // Region under a hit point = region of the nearest corner of the triangle
+  // that was hit, which matches the border line the shader draws.
   const regionAt = useCallback(
-    (faceIndex: number | undefined | null) => {
-      if (faceIndex == null) return null;
-      const index = geometry.getIndex();
-      const vertex = index ? index.getX(faceIndex * 3) : faceIndex * 3;
-      const regionIndex = Math.round(geometry.getAttribute("regionId").getX(vertex));
+    (e: ThreeEvent<PointerEvent | MouseEvent>) => {
+      if (!e.face) return null;
+      const local = e.object.worldToLocal(e.point.clone());
+      const position = geometry.getAttribute("position");
+      let best = e.face.a;
+      let bestDist = Infinity;
+      for (const v of [e.face.a, e.face.b, e.face.c]) {
+        const d = TMP.fromBufferAttribute(position, v).distanceToSquared(local);
+        if (d < bestDist) {
+          bestDist = d;
+          best = v;
+        }
+      }
+      const regionIndex = Math.round(geometry.getAttribute("regionId").getX(best));
       return REGIONS[regionIndex]?.id ?? null;
     },
     [geometry],
@@ -150,7 +158,7 @@ export function HumanMesh({ variant }: { variant: MeshVariant }) {
   const onPointerMove = useCallback(
     (e: ThreeEvent<PointerEvent>) => {
       e.stopPropagation();
-      setHovered(regionAt(e.faceIndex));
+      setHovered(regionAt(e));
     },
     [regionAt, setHovered],
   );
@@ -168,14 +176,14 @@ export function HumanMesh({ variant }: { variant: MeshVariant }) {
       e.stopPropagation();
       // Ignore clicks that were really the end of an orbit drag.
       if (e.delta > 4) return;
-      setSelected(regionAt(e.faceIndex));
+      setSelected(regionAt(e));
     },
     [regionAt, setSelected],
   );
 
   return (
     <group scale={SCALE}>
-      {/* BVH keeps pointer hit-testing fast on the 220k-triangle smooth mesh. */}
+      {/* BVH keeps pointer hit-testing fast on the ~77k-triangle mesh. */}
       <Bvh firstHitOnly>
         <mesh
           geometry={geometry}
@@ -193,4 +201,4 @@ export function HumanMesh({ variant }: { variant: MeshVariant }) {
   );
 }
 
-useGLTF.preload(MODEL_URLS.smooth);
+useGLTF.preload(MODEL_URL);

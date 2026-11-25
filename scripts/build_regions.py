@@ -8,13 +8,13 @@ exactly one anatomical region, using hand-tuned geometric rules built on top of
 real joint landmarks taken from the model's own skeleton (the rigged "Man" in
 the source file, shifted onto the HighPoly mesh).
 
-Vertices are split along region borders so each triangle carries one region
-id, and every vertex gets its distance to the edge of its region (used to
-feather the highlight). Step 3 (scripts/pack_models.mjs) turns the results
+Every vertex gets one region id; edges that cross a region border are
+refined until short, so the app can draw each border as a smooth line through
+the triangles between differently-labelled vertices. Step 3 (scripts/pack_models.mjs) turns the results
 into compressed GLBs.
 
 Outputs
-  scripts/.cache/regions_<variant>/*.bin  positions, normals, region, border, indices (raw LE arrays)
+  scripts/.cache/regions_<variant>/*.bin  positions, normals, region, indices (raw LE arrays)
   src/data/regionMap.generated.ts        REGION_ORDER + per-region label anchor point
 
 Coordinates are the mesh's own local units (body ~3.5 tall, feet at y=0,
@@ -34,7 +34,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 GLB = ROOT / "assets/source/HumanModels.glb"
 CACHE = ROOT / "scripts/.cache"
-VARIANTS = {"standard": "body_l0.npz", "smooth": "body_l1.npz"}
+VARIANTS = {"standard": "body_l0.npz"}
+MAX_BORDER_EDGE = 0.02  # split edges that cross a region border until shorter than this (~1 cm)
+MAX_REFINE_ROUNDS = 8
 OUT_TS = ROOT / "src/data/regionMap.generated.ts"
 MESH_NODE = "Man (HighPoly)"
 APP_SCALE = 1.75 / 3.495
@@ -324,7 +326,7 @@ def classify(C):
     put(front & (y > 2.74), "collarbone")
     put(front & (x < 0.05) & (y > 2.42), "sternum", False)
     put(front & (y > 2.47), "chest")
-    put(front & (y > 2.36) & (x > 0.11), "lower_ribs_front")
+    put(front & (y > 2.36) & (x >= 0.075), "lower_ribs_front")
     put(front & (y > 2.22) & (x < 0.075), "epigastric", False)
     put(front & (y > 2.13), "upper_abdomen")
     put(front & (y > 2.02) & (x < 0.07), "navel", False)
@@ -361,109 +363,178 @@ def classify(C):
     return out
 
 
-def smooth(labels, idx, iterations=2):
-    """Majority filter over edge-adjacent triangles to clean ragged borders.
-    A triangle switches to a label that at least two of its neighbours share."""
-    n = len(idx)
+def vertex_adjacency(idx, n):
+    """Sparse vertex adjacency (CSR) from triangle edges."""
+    from scipy.sparse import coo_matrix
+
     e = np.concatenate([idx[:, [0, 1]], idx[:, [1, 2]], idx[:, [2, 0]]])
-    f = np.tile(np.arange(n), 3)
-    key = np.minimum(e[:, 0], e[:, 1]).astype(np.int64) * (idx.max() + 1) + np.maximum(e[:, 0], e[:, 1])
-    order = np.argsort(key, kind="stable")
-    k, ff = key[order], f[order]
-    same = k[1:] == k[:-1]
-    a, b = ff[:-1][same], ff[1:][same]
-    # up to 3 edge neighbours per triangle (closed manifold -> exactly 3)
-    nb = np.full((n, 3), -1)
-    cnt = np.zeros(n, int)
-    for x, y in ((a, b), (b, a)):
-        for i in range(len(x)):
-            if cnt[x[i]] < 3:
-                nb[x[i], cnt[x[i]]] = y[i]
-                cnt[x[i]] += 1
+    e = np.concatenate([e, e[:, ::-1]])
+    g = coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(n, n)).tocsr()
+    g.data[:] = 1
+    return g
+
+
+def smooth(labels, adj, iterations=2):
+    """Majority filter over each vertex's neighbours: a vertex takes the label
+    shared by more than half of its neighbours. Removes one-vertex zigzags."""
     lab = labels.copy()
+    indptr, nbrs = adj.indptr, adj.indices
     for _ in range(iterations):
-        L = np.where(nb >= 0, lab[np.maximum(nb, 0)], -1)
-        cand = np.where((L[:, 0] == L[:, 1]) & (L[:, 0] >= 0), L[:, 0],
-               np.where((L[:, 1] == L[:, 2]) & (L[:, 1] >= 0), L[:, 1],
-               np.where((L[:, 0] == L[:, 2]) & (L[:, 0] >= 0), L[:, 0], -1)))
-        lab = np.where(cand >= 0, cand, lab)
+        new = lab.copy()
+        for v in range(len(lab)):
+            nb = lab[nbrs[indptr[v]:indptr[v + 1]]]
+            if len(nb) == 0:
+                continue
+            vals, cnts = np.unique(nb, return_counts=True)
+            k = cnts.argmax()
+            if cnts[k] * 2 > len(nb) and vals[k] != lab[v]:
+                new[v] = vals[k]
+        lab = new
     return lab
 
 
-def split_and_feather(pos, nrm, idx, labels):
-    """Duplicate vertices along region borders and compute, for every vertex,
-    its distance to the edge of its own region."""
-    from scipy.spatial import cKDTree
+def remove_islands(labels, adj, max_rounds=20):
+    """Make every region one connected patch: any piece of a region other than
+    its largest is relabelled to the label most common around it."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
 
-    corner_v = idx.reshape(-1)
-    corner_l = np.repeat(labels, 3)
-    key = corner_v.astype(np.int64) * 4096 + corner_l
-    uniq, inv = np.unique(key, return_inverse=True)
-    src_v = uniq // 4096
-    region = (uniq % 4096).astype(np.float32)
-    new_idx = inv.reshape(-1, 3).astype(np.uint32)
+    lab = labels.copy()
+    g = adj.tocoo()
+    n = len(lab)
+    for _ in range(max_rounds):
+        same = lab[g.row] == lab[g.col]
+        _, comp = connected_components(
+            coo_matrix((np.ones(same.sum()), (g.row[same], g.col[same])), shape=(n, n)), directed=False)
+        sizes = np.bincount(comp)
+        comp_label = np.zeros(sizes.size, int)
+        comp_label[comp] = lab
+        best = {}
+        for c in range(sizes.size):
+            l = comp_label[c]
+            if l not in best or sizes[c] > sizes[best[l]]:
+                best[l] = c
+        keep = np.zeros(sizes.size, bool)
+        keep[list(best.values())] = True
+        stray = np.flatnonzero(~keep)
+        if len(stray) == 0:
+            break
+        for c in stray:
+            vs = np.flatnonzero(comp == c)
+            out = adj[vs].indices
+            out = out[comp[out] != c]
+            if len(out):
+                vals, cnts = np.unique(lab[out], return_counts=True)
+                lab[vs] = vals[cnts.argmax()]
+    return lab
 
-    # border vertices: original vertices used by more than one region
-    n_regions_at_v = np.bincount(src_v, minlength=len(pos))
-    is_border_src = n_regions_at_v > 1
-    border = np.zeros(len(uniq), np.float32)
-    for r in np.unique(labels):
-        mine = region == r
-        b_pts = pos[src_v[mine & is_border_src[src_v]]]
-        if len(b_pts) == 0:
-            border[mine] = 1.0
+
+def refine_borders(pos, nrm, idx, labels, max_edge=MAX_BORDER_EDGE):
+    """Split edges whose two ends are in different regions (and are longer than
+    max_edge) at their midpoint; both triangles on the edge are split in two,
+    so the mesh stays watertight and its shape is unchanged.
+    Returns (pos, nrm, idx, new_vertex_count)."""
+    a, b = idx[:, [0, 1, 2]].reshape(-1), idx[:, [1, 2, 0]].reshape(-1)
+    sel = (labels[a] != labels[b]) & (np.linalg.norm(pos[a] - pos[b], axis=1) > max_edge)
+    todo = {(min(u, v), max(u, v)) for u, v in zip(a[sel].tolist(), b[sel].tolist())}
+    if not todo:
+        return pos, nrm, idx, 0
+    faces = [tuple(f) for f in idx.tolist()]
+    alive = [True] * len(faces)
+    edge_faces = {}
+    for fi, (x, y, z) in enumerate(faces):
+        for u, v in ((x, y), (y, z), (z, x)):
+            edge_faces.setdefault((min(u, v), max(u, v)), []).append(fi)
+    pos_l, nrm_l = [tuple(p) for p in pos], [tuple(q) for q in nrm]
+    # split longest first so the new triangles stay well shaped
+    for key in sorted(todo, key=lambda k: -np.linalg.norm(pos[k[0]] - pos[k[1]])):
+        fs = [f for f in edge_faces.get(key, []) if alive[f]]
+        if not fs:
             continue
-        d, _ = cKDTree(b_pts).query(pos[src_v[mine]])
-        border[mine] = d
-    return pos[src_v], nrm[src_v], region, border, new_idx
+        u, v = key
+        m = len(pos_l)
+        pos_l.append(tuple((np.array(pos_l[u]) + np.array(pos_l[v])) / 2))
+        nn = np.array(nrm_l[u]) + np.array(nrm_l[v])
+        nrm_l.append(tuple(nn / (np.linalg.norm(nn) + 1e-12)))
+        del edge_faces[key]
+        for f in fs:
+            x, y, z = faces[f]
+            for _ in range(3):
+                if (min(x, y), max(x, y)) == key:
+                    break
+                x, y, z = y, z, x
+            alive[f] = False
+            for nf in ((x, m, z), (m, y, z)):
+                faces.append(nf)
+                alive.append(True)
+                fi = len(faces) - 1
+                p_, q_, r_ = nf
+                for s_, t_ in ((p_, q_), (q_, r_), (r_, p_)):
+                    edge_faces.setdefault((min(s_, t_), max(s_, t_)), []).append(fi)
+    new_idx = np.array([f for f, ok in zip(faces, alive) if ok], dtype=np.int64)
+    return np.array(pos_l), np.array(nrm_l, dtype=nrm.dtype), new_idx, len(pos_l) - len(pos)
+
+
+def label_mesh(pos, nrm, idx, lut):
+    """Label every vertex, refine edges that cross region borders until they
+    are short, then clean up. The app draws each border as the smooth line
+    halfway between differently-labelled vertices."""
+    for _ in range(MAX_REFINE_ROUNDS):
+        lab = np.array([lut[s] for s in classify(pos)])
+        pos, nrm, idx, added = refine_borders(pos, nrm, idx, smooth(lab, vertex_adjacency(idx, len(pos)), 1))
+        if added == 0:
+            break
+    raw = np.array([lut[s] for s in classify(pos)])
+    adj = vertex_adjacency(idx, len(pos))
+    lab = remove_islands(smooth(raw, adj, 2), adj)
+    return pos, nrm, idx, raw, lab
 
 
 def main():
-    variants = {}
+    # Region order is fixed by the classifier's full set of names on the base mesh.
+    meshes = {}
     all_names = set()
     for name, fname in VARIANTS.items():
         d = np.load(CACHE / fname)
         pos, nrm, idx = d["positions"].astype(np.float64), d["normals"], d["triangles"].astype(np.int64)
-        C = pos[idx].mean(axis=1)
-        names = classify(C)
-        all_names |= set(names)
-        variants[name] = (pos, nrm, idx, C, names)
-
+        all_names |= set(classify(pos))
+        meshes[name] = (pos, nrm, idx)
     order = sorted(all_names)
     lut = {k: i for i, k in enumerate(order)}
+
     anchors = {}
-    for name, (pos, nrm, idx, C, names) in variants.items():
-        raw = np.array([lut[s] for s in names], dtype=np.int64)
-        # finer meshes need more passes for the same physical smoothing
-        iters = 2 if len(idx) < 60000 else 5
-        labels = smooth(raw, idx, iterations=iters)
-        P, N, R, B, I = split_and_feather(pos.astype(np.float32), nrm, idx, labels)
+    for name, (pos, nrm, idx) in meshes.items():
+        n0 = len(idx)
+        pos, nrm, idx, raw, labels = label_mesh(pos, nrm, idx, lut)
+        C = pos  # anchors work on vertices now
         out = CACHE / f"regions_{name}"
         out.mkdir(parents=True, exist_ok=True)
-        for fname, arr, dt in (("positions", P, "<f4"), ("normals", N, "<f4"), ("region", R, "<f4"),
-                               ("border", B, "<f4"), ("indices", I, "<u4")):
+        for f_ in out.glob("*.bin"):
+            f_.unlink()
+        for fname, arr, dt in (("positions", pos, "<f4"), ("normals", nrm, "<f4"),
+                               ("region", labels, "<f4"), ("indices", idx, "<u4")):
             (out / f"{fname}.bin").write_bytes(np.ascontiguousarray(arr, dtype=dt).tobytes())
-        print(f"{name}: {len(order)} regions, {len(idx)} triangles, {len(P)} vertices after border split")
-        if name == "standard":
-            for i, k in enumerate(order):
-                m = labels == i
-                if not m.any():
-                    m = raw == i
-                if not m.any():
-                    continue
-                pts = C[m]
-                c = pts.mean(axis=0)
-                best = pts[np.argmin(np.linalg.norm(pts - c, axis=1))]
-                anchors[k] = [round(float(v) * APP_SCALE, 4) for v in best]
+        print(f"{name}: {len(order)} regions, {n0} -> {len(idx)} triangles / {len(pos)} vertices after border refinement")
+        for i, k in enumerate(order):
+            m = labels == i
+            if not m.any():
+                m = raw == i
+            if not m.any():
+                continue
+            pts = C[m]
+            c = pts.mean(axis=0)
+            best = pts[np.argmin(np.linalg.norm(pts - c, axis=1))]
+            anchors[k] = [round(float(v) * APP_SCALE, 4) for v in best]
         if "--preview" in sys.argv:
-            preview(C, labels, order, pos, idx, out_dir=ROOT / f"scripts/preview/{name}")
+            face_lab = labels[idx[:, 0]]
+            preview(pos[idx].mean(axis=1), face_lab, order, pos, idx, out_dir=ROOT / f"scripts/preview/{name}")
 
     missing = [k for k in order if k not in anchors]
     assert not missing, f"regions without an anchor: {missing}"
     lines = [
         "// AUTO-GENERATED by scripts/build_regions.py. Do not edit by hand.",
         "// Index in REGION_ORDER == the _REGION vertex attribute baked into",
-        "// public/models/body-*.glb.",
+        "// public/models/body.glb.",
         "",
         f"export const REGION_ORDER = {json.dumps(order)} as const;",
         "",

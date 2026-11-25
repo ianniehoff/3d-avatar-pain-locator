@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 /**
- * Step 3 of the model pipeline: turn the per-variant arrays written by
- * scripts/build_regions.py into small, compressed GLBs for the app.
+ * Step 3 of the model pipeline: turn the arrays written by
+ * scripts/build_regions.py into the small, compressed public/models/body.glb.
  *
  * Each output holds one mesh ("Body") with
  *   POSITION, NORMAL          quantized (KHR_mesh_quantization)
- *   _REGION                   float, index into REGION_ORDER (one value per triangle)
- *   _BORDER                   float, distance (mesh units) to the edge of the region
+ *   _REGION                   float, per-vertex index into REGION_ORDER
  * plus the original "Skin" material, compressed with EXT_meshopt_compression.
  *
  * Run:  node scripts/pack_models.mjs
@@ -22,7 +21,7 @@ import { MeshoptDecoder, MeshoptEncoder } from "meshoptimizer";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE = join(ROOT, "assets/source/HumanModels.glb");
 const CACHE = join(ROOT, "scripts/.cache");
-const VARIANTS = ["standard", "smooth"];
+const VARIANTS = ["standard"];
 
 await MeshoptDecoder.ready;
 await MeshoptEncoder.ready;
@@ -55,7 +54,6 @@ for (const variant of VARIANTS) {
     .setAttribute("POSITION", acc("VEC3", load(variant, "positions", Float32Array)))
     .setAttribute("NORMAL", acc("VEC3", load(variant, "normals", Float32Array)))
     .setAttribute("_REGION", acc("SCALAR", load(variant, "region", Float32Array)))
-    .setAttribute("_BORDER", acc("SCALAR", load(variant, "border", Float32Array)))
     .setIndices(acc("SCALAR", load(variant, "indices", Uint32Array)))
     .setMaterial(material);
 
@@ -65,13 +63,12 @@ for (const variant of VARIANTS) {
 
   await doc.transform(
     reorder({ encoder: MeshoptEncoder }),
-    // Only quantize the standard attributes: _REGION must stay an exact index
-    // and _BORDER a plain distance for the shader.
+    // Only quantize the standard attributes: _REGION must stay an exact index.
     quantize({ pattern: /^(POSITION|NORMAL)$/ }),
     meshopt({ encoder: MeshoptEncoder, level: "medium" }),
   );
 
-  const out = join(ROOT, `public/models/body-${variant}.glb`);
+  const out = join(ROOT, "public/models/body.glb");
   await io.write(out, doc);
   const kb = (statSync(out).size / 1024).toFixed(0);
   console.log(`${variant}: ${prim.getIndices().getCount() / 3} triangles -> ${out.replace(ROOT + "/", "")} (${kb} KB)`);

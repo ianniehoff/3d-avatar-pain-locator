@@ -40,13 +40,12 @@ npm run dev
 
 The app ships small, compressed body models built from the original asset (`assets/source/HumanModels.glb`, not served) by a three-step pipeline:
 
-1. `scripts/build_body_mesh.py` (Blender, via `pip install bpy`): welds the high-poly body into one closed surface, fixes face orientation, and optionally applies one level of subdivision smoothing.
-2. `scripts/build_regions.py` (numpy + scipy): assigns every triangle to one of ~200 anatomical regions using joint landmarks from the model's skeleton plus hand-tuned geometric rules, splits vertices along region borders, and computes each vertex's distance to its region's edge (used to feather highlights). Also writes `src/data/regionMap.generated.ts`.
-3. `scripts/pack_models.mjs` (gltf-transform): writes `public/models/body-standard.glb` and `body-smooth.glb` with the region data baked in as vertex attributes, quantized and meshopt-compressed.
+1. `scripts/build_body_mesh.py` (Blender, via `pip install bpy`): welds the high-poly body into one closed surface and fixes face orientation (`--levels 1` adds subdivision smoothing; we ship level 0, since the visual gain didn't justify 6x the triangles).
+2. `scripts/build_regions.py` (numpy + scipy): assigns every vertex to one of ~200 anatomical regions using joint landmarks from the model's skeleton plus hand-tuned geometric rules, splits edges that cross a region border until they're about 1 cm long, and merges stray fragments so every region is one connected patch. The app's shader then draws each border as a smooth line through the middle of those triangles. Also writes `src/data/regionMap.generated.ts`.
+3. `scripts/pack_models.mjs` (gltf-transform): writes `public/models/body.glb` (~340 KB) with the region data baked in as vertex attributes, quantized and meshopt-compressed.
 
 ```bash
-python3 scripts/build_body_mesh.py --levels 0   # standard (welded)
-python3 scripts/build_body_mesh.py --levels 1   # smooth (welded + subdivided)
+python3 scripts/build_body_mesh.py --levels 0
 python3 scripts/build_regions.py [--preview]     # --preview renders region PNGs (needs matplotlib)
 node scripts/pack_models.mjs
 ```
