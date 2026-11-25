@@ -352,3 +352,47 @@ body {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
 }
+
+.viewer3d__variant {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  border: 1px solid var(--border, #d9d9de);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  z-index: 2;
+}
+
+.viewer3d__variant button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.viewer3d__variant button.is-active {
+  background: #2b2b33;
+  color: #fff;
+}
+
+.viewer3d__loading {
+  white-space: nowrap;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  font-size: 14px;
+  color: #444;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+.viewer3d--placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #666;
+  font-size: 14px;
+}

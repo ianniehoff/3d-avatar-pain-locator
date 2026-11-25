@@ -27,3 +27,4 @@ dist-ssr
 .env*
 scripts/preview/
 __pycache__/
+scripts/.cache/

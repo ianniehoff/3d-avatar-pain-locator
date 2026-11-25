@@ -1,15 +1,18 @@
-import { use, useCallback, useMemo, useRef } from "react";
-import { useGLTF } from "@react-three/drei";
+import { useCallback, useMemo, useRef } from "react";
+import { Bvh, useGLTF } from "@react-three/drei";
 import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 import { REGIONS } from "../data/regions";
-import { useSelectionStore } from "../state/selectionStore";
+import { useSelectionStore, type MeshVariant } from "../state/selectionStore";
 
-const MODEL_URL = "/models/HumanModels.glb";
-const REGION_MAP_URL = "/models/regionMap.bin";
-// Raw bounding-box height of the "Man (HighPoly)" node in the source file —
-// the source isn't authored in real-world meters, so we rescale it to match
-// our scene's ~1.75m convention.
+// Built by the pipeline in scripts/ (see README): one compressed mesh per
+// variant with a per-triangle region index (_REGION) and each vertex's
+// distance to the edge of its region (_BORDER) baked in.
+export const MODEL_URLS: Record<MeshVariant, string> = {
+  standard: "/models/body-standard.glb",
+  smooth: "/models/body-smooth.glb",
+};
+// Source mesh units -> our scene's ~1.75m convention.
 const SOURCE_HEIGHT = 3.495;
 const TARGET_HEIGHT = 1.75;
 const SCALE = TARGET_HEIGHT / SOURCE_HEIGHT;
@@ -19,24 +22,17 @@ const SELECTED_COLOR = new THREE.Color("#e0463f");
 const HOVER_MAX_STRENGTH = 0.65;
 const SELECTED_STRENGTH = 0.5;
 const LERP_SPEED = 12;
-
-// One Uint16 per triangle of the mesh: an index into REGIONS. Generated
-// offline by scripts/build_regions.py so every triangle belongs to exactly one
-// anatomical region, which gives crisp, stable highlight boundaries.
-const regionMapPromise: Promise<Uint16Array> = fetch(REGION_MAP_URL)
-  .then((r) => {
-    if (!r.ok) throw new Error(`Failed to load ${REGION_MAP_URL}: ${r.status}`);
-    return r.arrayBuffer();
-  })
-  .then((buf) => new Uint16Array(buf));
+// Highlights fade in over this distance (mesh units, ~1cm) from a region's
+// edge, and never drop below EDGE_FLOOR so thin regions (fingers) stay visible.
+const FEATHER = 0.02;
+const EDGE_FLOOR = 0.3;
 
 const REGION_INDEX_BY_ID: Record<string, number> = Object.fromEntries(
   REGIONS.map((r, i) => [r.id, i]),
 );
 
 interface GLTFResult {
-  nodes: Record<string, THREE.Mesh>;
-  materials: Record<string, THREE.Material>;
+  nodes: { Body: THREE.Mesh };
 }
 
 interface RegionShader {
@@ -48,40 +44,25 @@ interface RegionShader {
   };
 }
 
-export function HumanMesh() {
-  const { nodes, materials } = useGLTF(MODEL_URL) as unknown as GLTFResult;
-  const regionMap = use(regionMapPromise);
+export function HumanMesh({ variant }: { variant: MeshVariant }) {
+  const { nodes } = useGLTF(MODEL_URLS[variant]) as unknown as GLTFResult;
+  const body = nodes.Body;
   const setHovered = useSelectionStore((s) => s.setHovered);
   const setSelected = useSelectionStore((s) => s.setSelected);
   const shaderRef = useRef<RegionShader | null>(null);
 
   const geometry = useMemo(() => {
-    const source = nodes["Man_(HighPoly)"].geometry.clone();
-    // The source mesh's baked normals produce dark shading patches under our
-    // lighting, so recompute smooth normals while it is still indexed...
-    source.computeVertexNormals();
-    // ...then un-index it so each triangle owns its three vertices and can
-    // carry its own region id without bleeding into its neighbours.
-    const geo = source.toNonIndexed();
-    const triCount = geo.attributes.position.count / 3;
-    if (triCount !== regionMap.length) {
-      console.warn(`Region map has ${regionMap.length} entries but mesh has ${triCount} triangles`);
+    const geo = body.geometry;
+    // GLTFLoader exposes custom attributes lower-cased; give them shader-safe names.
+    if (!geo.getAttribute("regionId")) {
+      geo.setAttribute("regionId", geo.getAttribute("_region"));
+      geo.setAttribute("borderDist", geo.getAttribute("_border"));
     }
-    const ids = new Float32Array(triCount * 3);
-    for (let t = 0; t < triCount; t++) {
-      const id = regionMap[t] ?? 0;
-      ids[t * 3] = id;
-      ids[t * 3 + 1] = id;
-      ids[t * 3 + 2] = id;
-    }
-    geo.setAttribute("regionId", new THREE.BufferAttribute(ids, 1));
-    geo.computeBoundingSphere();
     return geo;
-  }, [nodes, regionMap]);
+  }, [body]);
 
   const material = useMemo(() => {
-    const base = materials.Skin as THREE.MeshStandardMaterial;
-    const mat = base.clone();
+    const mat = (body.material as THREE.MeshStandardMaterial).clone();
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uHoverIndex = { value: -1 };
       shader.uniforms.uHoverStrength = { value: 0 };
@@ -91,14 +72,27 @@ export function HumanMesh() {
       shader.uniforms.uSelectedColor = { value: SELECTED_COLOR };
 
       shader.vertexShader = shader.vertexShader
-        .replace("#include <common>", "#include <common>\nattribute float regionId;\nvarying float vRegionId;")
-        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRegionId = regionId;");
+        .replace(
+          "#include <common>",
+          `#include <common>
+          attribute float regionId;
+          attribute float borderDist;
+          varying float vRegionId;
+          varying float vBorderDist;`,
+        )
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+          vRegionId = regionId;
+          vBorderDist = borderDist;`,
+        );
 
       shader.fragmentShader = shader.fragmentShader
         .replace(
           "#include <common>",
           `#include <common>
           varying float vRegionId;
+          varying float vBorderDist;
           uniform float uHoverIndex;
           uniform float uHoverStrength;
           uniform vec3 uHoverColor;
@@ -109,11 +103,12 @@ export function HumanMesh() {
         .replace(
           "#include <dithering_fragment>",
           `
+          float edge = mix(${EDGE_FLOOR.toFixed(2)}, 1.0, smoothstep(0.0, ${FEATHER.toFixed(3)}, vBorderDist));
           if (abs(vRegionId - uSelectedIndex) < 0.5) {
-            gl_FragColor.rgb = mix(gl_FragColor.rgb, uSelectedColor, uSelectedStrength);
+            gl_FragColor.rgb = mix(gl_FragColor.rgb, uSelectedColor, uSelectedStrength * edge);
           }
           if (abs(vRegionId - uHoverIndex) < 0.5) {
-            gl_FragColor.rgb = mix(gl_FragColor.rgb, uHoverColor, uHoverStrength);
+            gl_FragColor.rgb = mix(gl_FragColor.rgb, uHoverColor, uHoverStrength * edge);
           }
           #include <dithering_fragment>
           `,
@@ -122,34 +117,34 @@ export function HumanMesh() {
       shaderRef.current = shader as unknown as RegionShader;
     };
     return mat;
-  }, [materials]);
+  }, [body]);
 
   useFrame((_, delta) => {
     const shader = shaderRef.current;
     if (!shader) return;
     const { hoveredRegionId, selectedRegionId } = useSelectionStore.getState();
     const k = Math.min(1, delta * LERP_SPEED);
+    const u = shader.uniforms;
 
     const hoverIndex = hoveredRegionId ? (REGION_INDEX_BY_ID[hoveredRegionId] ?? -1) : -1;
-    const u = shader.uniforms;
     // Keep the last hovered index while fading out so the glow doesn't pop off.
     if (hoverIndex >= 0) u.uHoverIndex.value = hoverIndex;
-    const hoverTarget = hoverIndex >= 0 ? HOVER_MAX_STRENGTH : 0;
-    u.uHoverStrength.value += (hoverTarget - u.uHoverStrength.value) * k;
+    u.uHoverStrength.value += ((hoverIndex >= 0 ? HOVER_MAX_STRENGTH : 0) - u.uHoverStrength.value) * k;
 
     const selectedIndex = selectedRegionId ? (REGION_INDEX_BY_ID[selectedRegionId] ?? -1) : -1;
     if (selectedIndex >= 0) u.uSelectedIndex.value = selectedIndex;
-    const selTarget = selectedIndex >= 0 ? SELECTED_STRENGTH : 0;
-    u.uSelectedStrength.value += (selTarget - u.uSelectedStrength.value) * k;
+    u.uSelectedStrength.value += ((selectedIndex >= 0 ? SELECTED_STRENGTH : 0) - u.uSelectedStrength.value) * k;
   });
 
   const regionAt = useCallback(
     (faceIndex: number | undefined | null) => {
       if (faceIndex == null) return null;
-      const idx = regionMap[faceIndex];
-      return idx == null ? null : (REGIONS[idx]?.id ?? null);
+      const index = geometry.getIndex();
+      const vertex = index ? index.getX(faceIndex * 3) : faceIndex * 3;
+      const regionIndex = Math.round(geometry.getAttribute("regionId").getX(vertex));
+      return REGIONS[regionIndex]?.id ?? null;
     },
-    [regionMap],
+    [geometry],
   );
 
   const onPointerMove = useCallback(
@@ -179,16 +174,23 @@ export function HumanMesh() {
   );
 
   return (
-    <mesh
-      geometry={geometry}
-      material={material}
-      scale={SCALE}
-      position={[0, 0, 0]}
-      onPointerMove={onPointerMove}
-      onPointerOut={onPointerOut}
-      onClick={onClick}
-    />
+    <group scale={SCALE}>
+      {/* BVH keeps pointer hit-testing fast on the 220k-triangle smooth mesh. */}
+      <Bvh firstHitOnly>
+        <mesh
+          geometry={geometry}
+          material={material}
+          // Quantized meshes carry a node transform that maps them back to source units.
+          position={body.position}
+          quaternion={body.quaternion}
+          scale={body.scale}
+          onPointerMove={onPointerMove}
+          onPointerOut={onPointerOut}
+          onClick={onClick}
+        />
+      </Bvh>
+    </group>
   );
 }
 
-useGLTF.preload(MODEL_URL);
+useGLTF.preload(MODEL_URLS.smooth);

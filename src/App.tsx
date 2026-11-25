@@ -1,7 +1,11 @@
 import { DisclaimerBanner } from "./components/DisclaimerBanner";
-import { Viewer3D } from "./components/Viewer3D";
+import { lazy, Suspense } from "react";
 import { InfoPanel } from "./components/InfoPanel";
 import { RegionListFallback } from "./components/RegionListFallback";
+
+// The 3D viewer (three.js + react-three-fiber) is the bulk of the JavaScript, so
+// it loads in its own chunk while the rest of the page renders immediately.
+const Viewer3D = lazy(() => import("./components/Viewer3D").then((m) => ({ default: m.Viewer3D })));
 
 function App() {
   return (
@@ -16,7 +20,9 @@ function App() {
       <DisclaimerBanner />
 
       <main className="app__main">
-        <Viewer3D />
+        <Suspense fallback={<div className="viewer3d viewer3d--placeholder">Loading 3D viewer…</div>}>
+          <Viewer3D />
+        </Suspense>
         <aside className="app__side">
           <InfoPanel />
           <RegionListFallback />

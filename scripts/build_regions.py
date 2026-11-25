@@ -2,20 +2,26 @@
 """
 Precompute the body-region map for the 3D avatar.
 
-Every triangle of the "Man (HighPoly)" mesh in public/models/HumanModels.glb is
-assigned to exactly one anatomical region, using hand-tuned geometric rules
-built on top of real joint landmarks taken from the model's own skeleton
-(the rigged "Man" in the same file, shifted onto the HighPoly mesh).
+Step 2 of the model pipeline. Every triangle of each prepared body mesh
+(scripts/.cache/body_l*.npz from scripts/build_body_mesh.py) is assigned to
+exactly one anatomical region, using hand-tuned geometric rules built on top of
+real joint landmarks taken from the model's own skeleton (the rigged "Man" in
+the source file, shifted onto the HighPoly mesh).
+
+Vertices are split along region borders so each triangle carries one region
+id, and every vertex gets its distance to the edge of its region (used to
+feather the highlight). Step 3 (scripts/pack_models.mjs) turns the results
+into compressed GLBs.
 
 Outputs
-  public/models/regionMap.bin          Uint16 per triangle: index into REGION_ORDER
-  src/data/regionMap.generated.ts      REGION_ORDER + per-region label anchor point
+  scripts/.cache/regions_<variant>/*.bin  positions, normals, region, border, indices (raw LE arrays)
+  src/data/regionMap.generated.ts        REGION_ORDER + per-region label anchor point
 
 Coordinates are the mesh's own local units (body ~3.5 tall, feet at y=0,
 facing +z, the model's LEFT side is +x). The app scales the mesh by
 1.75/3.495, and the anchors are written out already scaled to match.
 
-Run:  python3 scripts/build_regions.py           (needs numpy)
+Run:  python3 scripts/build_regions.py           (needs numpy + scipy)
       python3 scripts/build_regions.py --preview (also writes preview PNGs, needs matplotlib)
 """
 import json
@@ -26,8 +32,9 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-GLB = ROOT / "public/models/HumanModels.glb"
-OUT_BIN = ROOT / "public/models/regionMap.bin"
+GLB = ROOT / "assets/source/HumanModels.glb"
+CACHE = ROOT / "scripts/.cache"
+VARIANTS = {"standard": "body_l0.npz", "smooth": "body_l1.npz"}
 OUT_TS = ROOT / "src/data/regionMap.generated.ts"
 MESH_NODE = "Man (HighPoly)"
 APP_SCALE = 1.75 / 3.495
@@ -355,71 +362,116 @@ def classify(C):
 
 
 def smooth(labels, idx, iterations=2):
-    """Majority filter over edge-adjacent triangles to clean ragged borders."""
+    """Majority filter over edge-adjacent triangles to clean ragged borders.
+    A triangle switches to a label that at least two of its neighbours share."""
     n = len(idx)
-    edges = {}
-    for f, (a, b, c) in enumerate(idx):
-        for u, v in ((a, b), (b, c), (c, a)):
-            key = (min(u, v), max(u, v))
-            edges.setdefault(key, []).append(f)
-    nbrs = [[] for _ in range(n)]
-    for fs in edges.values():
-        for i in fs:
-            for j in fs:
-                if i != j:
-                    nbrs[i].append(j)
+    e = np.concatenate([idx[:, [0, 1]], idx[:, [1, 2]], idx[:, [2, 0]]])
+    f = np.tile(np.arange(n), 3)
+    key = np.minimum(e[:, 0], e[:, 1]).astype(np.int64) * (idx.max() + 1) + np.maximum(e[:, 0], e[:, 1])
+    order = np.argsort(key, kind="stable")
+    k, ff = key[order], f[order]
+    same = k[1:] == k[:-1]
+    a, b = ff[:-1][same], ff[1:][same]
+    # up to 3 edge neighbours per triangle (closed manifold -> exactly 3)
+    nb = np.full((n, 3), -1)
+    cnt = np.zeros(n, int)
+    for x, y in ((a, b), (b, a)):
+        for i in range(len(x)):
+            if cnt[x[i]] < 3:
+                nb[x[i], cnt[x[i]]] = y[i]
+                cnt[x[i]] += 1
     lab = labels.copy()
     for _ in range(iterations):
-        new = lab.copy()
-        for f in range(n):
-            if not nbrs[f]:
-                continue
-            vals, counts = np.unique(lab[nbrs[f]], return_counts=True)
-            k = counts.argmax()
-            if counts[k] >= 2 and vals[k] != lab[f]:
-                new[f] = vals[k]
-        lab = new
+        L = np.where(nb >= 0, lab[np.maximum(nb, 0)], -1)
+        cand = np.where((L[:, 0] == L[:, 1]) & (L[:, 0] >= 0), L[:, 0],
+               np.where((L[:, 1] == L[:, 2]) & (L[:, 1] >= 0), L[:, 1],
+               np.where((L[:, 0] == L[:, 2]) & (L[:, 0] >= 0), L[:, 0], -1)))
+        lab = np.where(cand >= 0, cand, lab)
     return lab
 
 
+def split_and_feather(pos, nrm, idx, labels):
+    """Duplicate vertices along region borders and compute, for every vertex,
+    its distance to the edge of its own region."""
+    from scipy.spatial import cKDTree
+
+    corner_v = idx.reshape(-1)
+    corner_l = np.repeat(labels, 3)
+    key = corner_v.astype(np.int64) * 4096 + corner_l
+    uniq, inv = np.unique(key, return_inverse=True)
+    src_v = uniq // 4096
+    region = (uniq % 4096).astype(np.float32)
+    new_idx = inv.reshape(-1, 3).astype(np.uint32)
+
+    # border vertices: original vertices used by more than one region
+    n_regions_at_v = np.bincount(src_v, minlength=len(pos))
+    is_border_src = n_regions_at_v > 1
+    border = np.zeros(len(uniq), np.float32)
+    for r in np.unique(labels):
+        mine = region == r
+        b_pts = pos[src_v[mine & is_border_src[src_v]]]
+        if len(b_pts) == 0:
+            border[mine] = 1.0
+            continue
+        d, _ = cKDTree(b_pts).query(pos[src_v[mine]])
+        border[mine] = d
+    return pos[src_v], nrm[src_v], region, border, new_idx
+
+
 def main():
-    pos, idx = load_mesh()
-    C = pos[idx].mean(axis=1)
-    names = classify(C)
-    order = sorted(set(names))
+    variants = {}
+    all_names = set()
+    for name, fname in VARIANTS.items():
+        d = np.load(CACHE / fname)
+        pos, nrm, idx = d["positions"].astype(np.float64), d["normals"], d["triangles"].astype(np.int64)
+        C = pos[idx].mean(axis=1)
+        names = classify(C)
+        all_names |= set(names)
+        variants[name] = (pos, nrm, idx, C, names)
+
+    order = sorted(all_names)
     lut = {k: i for i, k in enumerate(order)}
-    raw = np.array([lut[s] for s in names], dtype=np.int64)
-    labels = smooth(raw, idx)
-
-    OUT_BIN.write_bytes(labels.astype("<u2").tobytes())
-
-    # label anchor = triangle centroid closest to the region's mean centroid
     anchors = {}
-    for i, k in enumerate(order):
-        m = labels == i
-        if not m.any():  # smoothing swallowed a tiny region: fall back to its raw triangles
-            m = raw == i
-        pts = C[m]
-        c = pts.mean(axis=0)
-        best = pts[np.argmin(np.linalg.norm(pts - c, axis=1))]
-        anchors[k] = [round(float(v) * APP_SCALE, 4) for v in best]
+    for name, (pos, nrm, idx, C, names) in variants.items():
+        raw = np.array([lut[s] for s in names], dtype=np.int64)
+        # finer meshes need more passes for the same physical smoothing
+        iters = 2 if len(idx) < 60000 else 5
+        labels = smooth(raw, idx, iterations=iters)
+        P, N, R, B, I = split_and_feather(pos.astype(np.float32), nrm, idx, labels)
+        out = CACHE / f"regions_{name}"
+        out.mkdir(parents=True, exist_ok=True)
+        for fname, arr, dt in (("positions", P, "<f4"), ("normals", N, "<f4"), ("region", R, "<f4"),
+                               ("border", B, "<f4"), ("indices", I, "<u4")):
+            (out / f"{fname}.bin").write_bytes(np.ascontiguousarray(arr, dtype=dt).tobytes())
+        print(f"{name}: {len(order)} regions, {len(idx)} triangles, {len(P)} vertices after border split")
+        if name == "standard":
+            for i, k in enumerate(order):
+                m = labels == i
+                if not m.any():
+                    m = raw == i
+                if not m.any():
+                    continue
+                pts = C[m]
+                c = pts.mean(axis=0)
+                best = pts[np.argmin(np.linalg.norm(pts - c, axis=1))]
+                anchors[k] = [round(float(v) * APP_SCALE, 4) for v in best]
+        if "--preview" in sys.argv:
+            preview(C, labels, order, pos, idx, out_dir=ROOT / f"scripts/preview/{name}")
 
+    missing = [k for k in order if k not in anchors]
+    assert not missing, f"regions without an anchor: {missing}"
     lines = [
         "// AUTO-GENERATED by scripts/build_regions.py. Do not edit by hand.",
-        "// Index in REGION_ORDER == the Uint16 value stored per triangle in",
-        "// public/models/regionMap.bin.",
+        "// Index in REGION_ORDER == the _REGION vertex attribute baked into",
+        "// public/models/body-*.glb.",
         "",
-        f"export const REGION_ORDER = {json.dumps([k for k in sorted(set(names))])} as const;",
+        f"export const REGION_ORDER = {json.dumps(order)} as const;",
         "",
         "export const REGION_ANCHORS: Record<string, [number, number, number]> = {",
     ]
-    lines += [f"  {json.dumps(k)}: {json.dumps(v)}," for k, v in anchors.items()]
+    lines += [f"  {json.dumps(k)}: {json.dumps(anchors[k])}," for k in order]
     lines += ["};", ""]
     OUT_TS.write_text("\n".join(lines))
-    print(f"{len(order)} regions over {len(idx)} triangles")
-
-    if "--preview" in sys.argv:
-        preview(C, labels, sorted(set(names)), pos, idx)
 
 
 def preview(C, labels, order, pos, idx, out_dir=ROOT / "scripts/preview"):
@@ -430,7 +482,7 @@ def preview(C, labels, order, pos, idx, out_dir=ROOT / "scripts/preview"):
     import matplotlib.pyplot as plt
     from matplotlib.collections import PolyCollection
 
-    out_dir.mkdir(exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(11)
     cols = rng.random((len(order), 3)) * 0.75 + 0.25
     tri = pos[idx]

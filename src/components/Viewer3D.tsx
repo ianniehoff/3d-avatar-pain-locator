@@ -1,8 +1,20 @@
 import { Suspense, useRef } from "react";
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Grid } from "@react-three/drei";
+import { OrbitControls, Grid, Html, useProgress } from "@react-three/drei";
 import * as THREE from "three";
 import { Avatar } from "../scene/Avatar";
+import { useSelectionStore } from "../state/selectionStore";
+
+function LoadingIndicator() {
+  const { progress } = useProgress();
+  return (
+    <Html center>
+      <div className="viewer3d__loading" role="status">
+        Loading body model… {Math.round(progress)}%
+      </div>
+    </Html>
+  );
+}
 
 const TARGET = new THREE.Vector3(0, 0.85, 0);
 const MIN_TARGET_Y = 0.0;
@@ -11,6 +23,8 @@ const PAN_STEP = 0.22;
 
 export function Viewer3D() {
   const controlsRef = useRef<any>(null);
+  const meshVariant = useSelectionStore((s) => s.meshVariant);
+  const setMeshVariant = useSelectionStore((s) => s.setMeshVariant);
 
   const flip180 = () => {
     const controls = controlsRef.current;
@@ -43,7 +57,7 @@ export function Viewer3D() {
         <hemisphereLight args={["#ffffff", "#a06a3c", 1.0]} />
         <directionalLight position={[2, 3, 2]} intensity={0.45} />
         <directionalLight position={[-2, 1.5, -1]} intensity={0.25} />
-        <Suspense fallback={null}>
+        <Suspense fallback={<LoadingIndicator />}>
           <Avatar />
         </Suspense>
         <Grid
@@ -64,6 +78,19 @@ export function Viewer3D() {
           enableDamping
         />
       </Canvas>
+      <div className="viewer3d__variant" role="group" aria-label="Body model">
+        {(["standard", "smooth"] as const).map((v) => (
+          <button
+            key={v}
+            type="button"
+            aria-pressed={meshVariant === v}
+            className={meshVariant === v ? "is-active" : undefined}
+            onClick={() => setMeshVariant(v)}
+          >
+            {v === "standard" ? "Standard" : "Smooth"}
+          </button>
+        ))}
+      </div>
       <div className="viewer3d__controls">
         <button type="button" onClick={flip180}>
           Flip front / back

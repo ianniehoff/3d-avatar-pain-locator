@@ -36,19 +36,22 @@ npm install
 npm run dev
 \`\`\`
 
-## Body Region Map
+## Body Model & Region Map
 
-Every triangle of the 3D model is assigned to one of ~200 anatomical regions (e.g. "Left Outer Elbow", "Right SI Joint", "Left Arch of Foot"). The map is precomputed by `scripts/build_regions.py`, which uses joint landmarks from the model's own skeleton plus hand-tuned geometric rules, and writes:
+The app ships small, compressed body models built from the original asset (`assets/source/HumanModels.glb`, not served) by a three-step pipeline:
 
-- `public/models/regionMap.bin` (one region index per triangle)
-- `src/data/regionMap.generated.ts` (region order and label anchors)
-
-The educational content for each region lives in `src/data/regionContent.ts`. To change region boundaries, edit the rules and rerun:
+1. `scripts/build_body_mesh.py` (Blender, via `pip install bpy`): welds the high-poly body into one closed surface, fixes face orientation, and optionally applies one level of subdivision smoothing.
+2. `scripts/build_regions.py` (numpy + scipy): assigns every triangle to one of ~200 anatomical regions using joint landmarks from the model's skeleton plus hand-tuned geometric rules, splits vertices along region borders, and computes each vertex's distance to its region's edge (used to feather highlights). Also writes `src/data/regionMap.generated.ts`.
+3. `scripts/pack_models.mjs` (gltf-transform): writes `public/models/body-standard.glb` and `body-smooth.glb` with the region data baked in as vertex attributes, quantized and meshopt-compressed.
 
 ```bash
-python3 scripts/build_regions.py            # needs numpy
-python3 scripts/build_regions.py --preview  # also renders PNG previews (needs matplotlib)
+python3 scripts/build_body_mesh.py --levels 0   # standard (welded)
+python3 scripts/build_body_mesh.py --levels 1   # smooth (welded + subdivided)
+python3 scripts/build_regions.py [--preview]     # --preview renders region PNGs (needs matplotlib)
+node scripts/pack_models.mjs
 ```
+
+The educational content for each region lives in `src/data/regionContent.ts`.
 
 ## Status
 
