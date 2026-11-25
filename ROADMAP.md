@@ -8,6 +8,7 @@ Where the 3D Pain Locator goes next. Phases are roughly in order of payoff for e
 - [x] Content for all 108 region types, with left/right differences and red flags
 - [x] Searchable list grouped by body area, searchable by condition
 - [x] Phase 1 (smoothing, mobile, load speed, region borders), shipped 2026-11-24
+- [x] Phase 2 (female body, male/female switch, sex-specific content), shipped 2026-11-24
 
 ---
 
@@ -26,9 +27,9 @@ Make it feel like a finished product.
 
 The model file already contains a detailed female mesh that isn't used yet.
 
-- [ ] Run the region mapping on the female mesh with its own joint landmarks
-- [ ] Male / female toggle
-- [ ] Sex-specific content where it matters (pelvic, lower abdominal, chest)
+- [x] Region mapping on the female mesh: both skeletons' landmarks extracted, female body mapped onto the male rules bone by bone (male output verified unchanged), 201 areas incl. new breast regions
+- [x] Male / Female switch: remembered across visits and in the URL (?body=), keeps the selected area when switching, only the chosen body downloads
+- [x] Sex-specific content: ovarian, menstrual and pregnancy causes and warnings for the female body, prostate and testicular for the male body, new breast and armpit content
 
 ## Phase 3: Symptom tool
 
